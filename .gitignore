@@ -1,0 +1,9 @@
+node_modules/
+sessions/
+database.json
+.env
+.DS_Store
+*.log
+npm-debug.log*
+.puppeteer/
+chrome-linux/
