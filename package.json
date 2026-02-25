@@ -1,0 +1,26 @@
+{
+  "name": "whatsapp-link-api",
+  "version": "2.0.0",
+  "description": " WhatsApp API - ",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "pm2": "pm2 start index.js --blast",
+    "pm2-stop": "pm2 stop blast",
+    "pm2-logs": "pm2 logs blast"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "whatsapp-web.js": "^1.23.0",
+    "qrcode-terminal": "^0.12.0",
+    "cors": "^2.8.5",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
