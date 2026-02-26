@@ -1,11 +1,10 @@
 // ===================================================
 // BLAST ULTIMATE WHATSAPP API v15.0.0
+// index.js - প্রোডাকশন রেডি
 // কোনো API Key লাগবে না - ওপেন এক্সেস
-// ফুল ওয়ার্কিং কোড - ১০০% গ্যারান্টি
 // Author: Md Dhaka
 // ===================================================
 
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
@@ -57,13 +56,13 @@ app.use(compression());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// রেট লিমিট (অপশনাল)
+// রেট লিমিট
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 মিনিট
-  max: 200, // ২০০ রিকোয়েস্ট প্রতি মিনিট
+  windowMs: 60 * 1000,
+  max: 200,
   message: { 
     success: false, 
-    error: 'Too many requests. Please try again later.' 
+    error: 'Too many requests' 
   }
 });
 app.use('/api/', limiter);
@@ -77,7 +76,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ==================== মেসেজ কিউ সিস্টেম ====================
+// ==================== মেসেজ কিউ ====================
 class MessageQueue {
   constructor() {
     this.queue = [];
@@ -109,7 +108,6 @@ class MessageQueue {
       this.stats.pending++;
       this.process();
       
-      logger.info(`📥 Queued [${jobId}] -> ${jid.split('@')[0]}`);
       return jobId;
     });
   }
@@ -120,7 +118,6 @@ class MessageQueue {
     this.processing = true;
 
     while (this.queue.length > 0) {
-      // ২ মেসেজ/সেকেন্ড রেট লিমিট
       const now = Date.now();
       
       if (now - this.secondStart >= 1000) {
@@ -134,11 +131,10 @@ class MessageQueue {
           await new Promise(resolve => setTimeout(resolve, waitTime));
         }
         this.messageCount = 0;
-        this.secondStart = Date.now();
+        this.secondStart = now;
         continue;
       }
 
-      // ৫০০ms ডেলেই
       const timeSinceLast = now - this.lastMessageTime;
       if (timeSinceLast < 500) {
         await new Promise(resolve => 
@@ -152,18 +148,12 @@ class MessageQueue {
       try {
         const session = sessions.get(job.sessionId);
         
-        if (!session) {
-          throw new Error(`Session "${job.sessionId}" not found`);
-        }
-        
-        if (session.status !== 'CONNECTED') {
-          throw new Error(`Session "${job.sessionId}" is ${session.status}`);
+        if (!session || session.status !== 'CONNECTED') {
+          throw new Error('Session not connected');
         }
 
-        // মেসেজ পাঠান
         await session.sock.sendMessage(job.jid, job.content);
         
-        // স্ট্যাটস আপডেট
         this.messageCount++;
         this.lastMessageTime = Date.now();
         this.stats.sent++;
@@ -178,12 +168,9 @@ class MessageQueue {
           to: job.jid,
           time: Date.now()
         });
-
-        logger.info(`✅ Sent [${job.id}] -> ${job.jid.split('@')[0]}`);
       } catch (error) {
         this.stats.failed++;
         job.reject(error);
-        logger.error(`❌ Failed [${job.id}]: ${error.message}`);
       }
     }
 
@@ -195,8 +182,7 @@ class MessageQueue {
       sent: this.stats.sent,
       failed: this.stats.failed,
       pending: this.stats.pending,
-      queueLength: this.queue.length,
-      currentRate: `${this.messageCount}/sec`
+      queueLength: this.queue.length
     };
   }
 }
@@ -205,10 +191,8 @@ class MessageQueue {
 const sessions = new Map();
 const messageQueue = new MessageQueue();
 
-// সেশন তৈরি ফাংশন
 async function createSession(sessionId, phoneNumber = null) {
   try {
-    // পুরনো সেশন থাকলে ক্লিনআপ
     if (sessions.has(sessionId)) {
       const old = sessions.get(sessionId);
       if (old.sock) {
@@ -220,18 +204,14 @@ async function createSession(sessionId, phoneNumber = null) {
       sessions.delete(sessionId);
     }
 
-    logger.info(`🔄 Creating session: ${sessionId}`);
+    logger.info(`Creating session: ${sessionId}`);
 
     const authPath = path.join(SESSIONS_DIR, sessionId);
     await fs.ensureDir(authPath);
 
-    // অথ স্টেট লোড
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
-
-    // ওয়েব ভার্সন
     const { version } = await fetchLatestWaWebVersion();
 
-    // সকেট তৈরি
     const sock = makeWASocket({
       version,
       logger: pino({ level: 'silent' }),
@@ -243,31 +223,23 @@ async function createSession(sessionId, phoneNumber = null) {
       browser: Browsers.macOS('Chrome'),
       markOnlineOnConnect: true,
       syncFullHistory: false,
-      generateHighQualityLinkPreview: true,
       shouldIgnoreJid: (jid) => jid === 'status@broadcast'
     });
 
-    // ক্রেডেনশিয়াল সেভ
     sock.ev.on('creds.update', saveCreds);
 
-    // সেশন ডেটা
     const sessionData = {
       sock,
       status: 'INITIALIZING',
       qr: null,
       pairingCode: null,
       user: null,
-      stats: { 
-        totalSent: 0, 
-        received: 0,
-        createdAt: Date.now()
-      },
+      stats: { totalSent: 0, received: 0 },
       lastActive: Date.now()
     };
 
     sessions.set(sessionId, sessionData);
 
-    // কানেকশন ইভেন্ট
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
@@ -277,7 +249,6 @@ async function createSession(sessionId, phoneNumber = null) {
         if (session) {
           session.qr = qrBase64;
           session.status = 'QR_READY';
-          logger.info(`📱 QR Ready for ${sessionId}`);
         }
       }
 
@@ -285,18 +256,12 @@ async function createSession(sessionId, phoneNumber = null) {
         const statusCode = (lastDisconnect?.error instanceof Boom)?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-        logger.warn(`🔌 Session ${sessionId} closed: ${statusCode}`);
-
         if (shouldReconnect) {
-          logger.info(`♻️ Reconnecting ${sessionId} in 3s...`);
           setTimeout(() => {
-            createSession(sessionId).catch(e => 
-              logger.error(`Reconnect failed: ${e.message}`)
-            );
+            createSession(sessionId).catch(() => {});
           }, 3000);
         } else {
           sessions.delete(sessionId);
-          logger.info(`🚫 Session ${sessionId} logged out`);
         }
       }
 
@@ -307,13 +272,10 @@ async function createSession(sessionId, phoneNumber = null) {
           session.qr = null;
           session.user = sock.user;
           session.lastActive = Date.now();
-          
-          logger.info(`✅ Session ${sessionId} connected as ${sock.user?.id || 'Unknown'}`);
         }
       }
     });
 
-    // মেসেজ হ্যান্ডলার
     sock.ev.on('messages.upsert', async (m) => {
       if (m.type !== 'notify') return;
       
@@ -323,13 +285,10 @@ async function createSession(sessionId, phoneNumber = null) {
         if (session) {
           session.stats.received = (session.stats.received || 0) + 1;
           session.lastActive = Date.now();
-          
-          logger.info(`📨 Received from ${msg.key.remoteJid} on ${sessionId}`);
         }
       }
     });
 
-    // পেয়ারিং কোড
     if (phoneNumber) {
       try {
         const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
@@ -339,10 +298,9 @@ async function createSession(sessionId, phoneNumber = null) {
         if (session) {
           session.pairingCode = code;
           session.status = 'PAIRING_READY';
-          logger.info(`🔢 Pairing code for ${sessionId}: ${code}`);
         }
       } catch (error) {
-        logger.error(`Pairing failed for ${sessionId}: ${error.message}`);
+        logger.error(`Pairing failed: ${error.message}`);
       }
     }
 
@@ -353,7 +311,6 @@ async function createSession(sessionId, phoneNumber = null) {
   }
 }
 
-// সব সেশন লোড
 async function loadAllSessions() {
   try {
     const dirs = await fs.readdir(SESSIONS_DIR);
@@ -361,81 +318,54 @@ async function loadAllSessions() {
 
     for (const dir of dirs) {
       const stat = await fs.stat(path.join(SESSIONS_DIR, dir));
-      if (stat.isDirectory() && dir !== 'default' && dir.length > 0) {
+      if (stat.isDirectory() && dir !== 'default') {
         try {
           await createSession(dir);
           loaded++;
-        } catch (error) {
-          logger.error(`Failed to load ${dir}: ${error.message}`);
-        }
+        } catch (error) {}
       }
     }
 
-    logger.info(`✅ Loaded ${loaded} existing sessions`);
-  } catch (error) {
-    logger.error(`Error loading sessions: ${error.message}`);
-  }
+    logger.info(`Loaded ${loaded} sessions`);
+  } catch (error) {}
 }
 
 // ==================== API এন্ডপয়েন্ট ====================
 
-// হোম পেজ
 app.get('/', (req, res) => {
   res.json({
     name: 'Blast WhatsApp API',
     version: '15.0.0',
     author: 'Md Dhaka',
-    status: 'running',
-    auth: 'No API Key Required',
-    features: {
-      messagesPerSecond: 2,
-      messageDelay: '500ms',
-      unlimitedMessages: true,
-      maxSessions: 'Unlimited'
-    },
     endpoints: {
-      listSessions: 'GET /api/sessions',
-      createSession: 'POST /api/session/create',
-      getQR: 'GET /api/session/:id/qr',
-      sessionStatus: 'GET /api/session/:id/status',
-      logoutSession: 'POST /api/session/:id/logout',
-      sendMessage: 'POST /api/send',
-      sendBulk: 'POST /api/send/bulk',
-      sendMedia: 'POST /api/send/media',
-      queueStatus: 'GET /api/queue',
-      systemStats: 'GET /api/stats'
+      health: 'GET /health',
+      sessions: 'GET /api/sessions',
+      create: 'POST /api/session/create',
+      qr: 'GET /api/session/:id/qr',
+      status: 'GET /api/session/:id/status',
+      send: 'POST /api/send',
+      bulk: 'POST /api/send/bulk',
+      logout: 'POST /api/session/:id/logout',
+      stats: 'GET /api/stats'
     }
   });
 });
 
-// হেলথ চেক
 app.get('/health', (req, res) => {
-  const connected = Array.from(sessions.values()).filter(s => s.status === 'CONNECTED').length;
-  
   res.json({
     status: 'healthy',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    sessions: {
-      total: sessions.size,
-      connected: connected
-    }
+    sessions: sessions.size
   });
 });
 
-// সব সেশন দেখুন
 app.get('/api/sessions', (req, res) => {
   const sessionList = Array.from(sessions.entries()).map(([id, data]) => ({
     id,
     status: data.status,
-    user: data.user ? {
-      id: data.user.id,
-      name: data.user.name
-    } : null,
+    user: data.user,
     stats: data.stats,
-    lastActive: data.lastActive,
-    hasQR: !!data.qr,
-    hasPairingCode: !!data.pairingCode
+    lastActive: data.lastActive
   }));
 
   res.json({
@@ -445,7 +375,6 @@ app.get('/api/sessions', (req, res) => {
   });
 });
 
-// সিস্টেম স্ট্যাটস
 app.get('/api/stats', (req, res) => {
   const connected = Array.from(sessions.values()).filter(s => s.status === 'CONNECTED').length;
   const totalSent = Array.from(sessions.values()).reduce((acc, s) => acc + (s.stats?.totalSent || 0), 0);
@@ -455,32 +384,16 @@ app.get('/api/stats', (req, res) => {
     success: true,
     sessions: {
       total: sessions.size,
-      connected,
-      disconnected: sessions.size - connected
+      connected
     },
     messages: {
       sent: totalSent,
-      received: totalReceived,
-      total: totalSent + totalReceived
+      received: totalReceived
     },
-    queue: messageQueue.getStats(),
-    system: {
-      uptime: process.uptime(),
-      memory: process.memoryUsage().heapUsed / 1024 / 1024 + ' MB',
-      nodeVersion: process.version
-    }
-  });
-});
-
-// কিউ স্ট্যাটস
-app.get('/api/queue', (req, res) => {
-  res.json({
-    success: true,
     queue: messageQueue.getStats()
   });
 });
 
-// নতুন সেশন তৈরি
 app.post('/api/session/create', async (req, res) => {
   try {
     const { sessionId, phone } = req.body;
@@ -488,14 +401,7 @@ app.post('/api/session/create', async (req, res) => {
     if (!sessionId) {
       return res.status(400).json({
         success: false,
-        error: 'sessionId is required'
-      });
-    }
-
-    if (sessionId.length < 3 || sessionId.length > 50) {
-      return res.status(400).json({
-        success: false,
-        error: 'sessionId must be 3-50 characters'
+        error: 'sessionId required'
       });
     }
 
@@ -505,10 +411,7 @@ app.post('/api/session/create', async (req, res) => {
       success: true,
       sessionId,
       status: session.status,
-      method: phone ? 'pairing_code' : 'qr',
-      message: phone 
-        ? 'Use /api/session/:id/qr to get pairing code' 
-        : 'Use /api/session/:id/qr to scan QR code'
+      method: phone ? 'pairing_code' : 'qr'
     });
   } catch (error) {
     res.status(500).json({
@@ -518,7 +421,6 @@ app.post('/api/session/create', async (req, res) => {
   }
 });
 
-// কিউআর কোড বা পেয়ারিং কোড
 app.get('/api/session/:sessionId/qr', (req, res) => {
   const { sessionId } = req.params;
   const session = sessions.get(sessionId);
@@ -545,13 +447,11 @@ app.get('/api/session/:sessionId/qr', (req, res) => {
   } else {
     res.json({
       success: false,
-      status: session.status,
-      message: 'QR not ready yet'
+      status: session.status
     });
   }
 });
 
-// সেশন স্ট্যাটাস
 app.get('/api/session/:sessionId/status', (req, res) => {
   const { sessionId } = req.params;
   const session = sessions.get(sessionId);
@@ -573,7 +473,6 @@ app.get('/api/session/:sessionId/status', (req, res) => {
   });
 });
 
-// সেশন লগআউট
 app.post('/api/session/:sessionId/logout', async (req, res) => {
   const { sessionId } = req.params;
   const session = sessions.get(sessionId);
@@ -592,13 +491,12 @@ app.post('/api/session/:sessionId/logout', async (req, res) => {
     }
     sessions.delete(sessionId);
     
-    // অথ ফোল্ডার ডিলিট
     const authPath = path.join(SESSIONS_DIR, sessionId);
     await fs.remove(authPath);
 
     res.json({
       success: true,
-      message: 'Session logged out successfully'
+      message: 'Logged out'
     });
   } catch (error) {
     res.status(500).json({
@@ -608,7 +506,6 @@ app.post('/api/session/:sessionId/logout', async (req, res) => {
   }
 });
 
-// টেক্সট মেসেজ পাঠান
 app.post('/api/send', async (req, res) => {
   try {
     const { sessionId, to, message } = req.body;
@@ -616,57 +513,7 @@ app.post('/api/send', async (req, res) => {
     if (!sessionId || !to || !message) {
       return res.status(400).json({
         success: false,
-        error: 'sessionId, to, and message are required'
-      });
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    if (session.status !== 'CONNECTED') {
-      return res.status(400).json({
-        success: false,
-        error: `Session is ${session.status}, not connected`
-      });
-    }
-
-    // জেআইডি ফরম্যাট
-    const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
-
-    // কিউতে যোগ করুন
-    const jobId = await messageQueue.add(sessionId, jid, { text: message });
-
-    res.json({
-      success: true,
-      queued: true,
-      messageId: jobId,
-      sessionId,
-      to: jid,
-      estimatedDelay: '500ms',
-      rate: '2 msg/sec'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// মিডিয়া মেসেজ পাঠান
-app.post('/api/send/media', async (req, res) => {
-  try {
-    const { sessionId, to, type, url, caption } = req.body;
-
-    if (!sessionId || !to || !type || !url) {
-      return res.status(400).json({
-        success: false,
-        error: 'sessionId, to, type, url required'
+        error: 'sessionId, to, message required'
       });
     }
 
@@ -679,31 +526,12 @@ app.post('/api/send/media', async (req, res) => {
     }
 
     const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
-
-    // মিডিয়া কন্টেন্ট
-    let content;
-    if (type === 'image') {
-      content = { image: { url }, caption };
-    } else if (type === 'video') {
-      content = { video: { url }, caption };
-    } else if (type === 'audio') {
-      content = { audio: { url } };
-    } else if (type === 'document') {
-      content = { document: { url }, fileName: caption || 'file' };
-    } else {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid type. Use: image/video/audio/document'
-      });
-    }
-
-    const jobId = await messageQueue.add(sessionId, jid, content);
+    const jobId = await messageQueue.add(sessionId, jid, { text: message });
 
     res.json({
       success: true,
       queued: true,
-      messageId: jobId,
-      type
+      messageId: jobId
     });
   } catch (error) {
     res.status(500).json({
@@ -713,7 +541,6 @@ app.post('/api/send/media', async (req, res) => {
   }
 });
 
-// বাল্ক মেসেজ পাঠান
 app.post('/api/send/bulk', async (req, res) => {
   try {
     const { sessionId, messages } = req.body;
@@ -721,14 +548,7 @@ app.post('/api/send/bulk', async (req, res) => {
     if (!sessionId || !messages || !messages.length) {
       return res.status(400).json({
         success: false,
-        error: 'sessionId and messages array required'
-      });
-    }
-
-    if (messages.length > 500) {
-      return res.status(400).json({
-        success: false,
-        error: 'Maximum 500 messages per bulk request'
+        error: 'sessionId and messages required'
       });
     }
 
@@ -741,20 +561,11 @@ app.post('/api/send/bulk', async (req, res) => {
     }
 
     const results = [];
-    const startTime = Date.now();
 
     for (const msg of messages) {
       try {
         const jid = msg.to.includes('@') ? msg.to : `${msg.to}@s.whatsapp.net`;
-        
-        let content;
-        if (msg.type === 'text' || !msg.type) {
-          content = { text: msg.message };
-        } else {
-          content = { [msg.type]: { url: msg.message }, caption: msg.caption };
-        }
-
-        const jobId = await messageQueue.add(sessionId, jid, content);
+        const jobId = await messageQueue.add(sessionId, jid, { text: msg.message });
         
         results.push({
           to: msg.to,
@@ -770,20 +581,11 @@ app.post('/api/send/bulk', async (req, res) => {
       }
     }
 
-    const totalTime = Date.now() - startTime;
-
     res.json({
       success: true,
       total: messages.length,
       successful: results.filter(r => r.success).length,
-      failed: results.filter(r => !r.success).length,
-      results,
-      performance: {
-        totalTime: `${totalTime}ms`,
-        averagePerMessage: `${(totalTime / messages.length).toFixed(0)}ms`,
-        rate: '2 msg/sec',
-        delay: '500ms'
-      }
+      results
     });
   } catch (error) {
     res.status(500).json({
@@ -795,25 +597,14 @@ app.post('/api/send/bulk', async (req, res) => {
 
 // ==================== সার্ভার স্টার্ট ====================
 const server = app.listen(PORT, async () => {
-  console.log('\n' + '='.repeat(60));
+  console.log('\n' + '='.repeat(50));
   console.log('🚀 BLAST WHATSAPP API v15.0.0');
-  console.log('='.repeat(60));
+  console.log('='.repeat(50));
   console.log(`📱 Server: http://localhost:${PORT}`);
-  console.log(`🔓 Authentication: No API Key Required`);
-  console.log(`⚡ Message Rate: 2 messages/second`);
-  console.log(`⏱️  Message Delay: 500ms`);
-  console.log(`📦 Unlimited Messages: Yes`);
-  console.log(`📊 Max Sessions: Unlimited`);
-  console.log('='.repeat(60) + '\n');
+  console.log(`⚡ 2 msg/sec | 500ms delay`);
+  console.log('='.repeat(50) + '\n');
 
-  // সব সেশন লোড
   await loadAllSessions();
-  
-  // স্ট্যাটস দেখান
-  setTimeout(() => {
-    const connected = Array.from(sessions.values()).filter(s => s.status === 'CONNECTED').length;
-    console.log(`✅ Ready: ${connected}/${sessions.size} sessions connected\n`);
-  }, 2000);
 });
 
 // গ্রেসফুল শাটডাউন
@@ -821,9 +612,8 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 async function shutdown() {
-  console.log('\n🛑 Shutting down...');
+  console.log('\nShutting down...');
   
-  // সব সেশন লগআউট
   for (const [id, session] of sessions.entries()) {
     if (session.sock) {
       try {
@@ -834,15 +624,9 @@ async function shutdown() {
   }
 
   server.close(() => {
-    console.log('✅ Server closed');
+    console.log('Server closed');
     process.exit(0);
   });
-
-  setTimeout(() => {
-    console.log('❌ Force shutdown');
-    process.exit(1);
-  }, 10000);
 }
 
-// ==================== এক্সপোর্ট ====================
-module.exports = { app, sessions, messageQueue };
+module.exports = app;
