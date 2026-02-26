@@ -1,16 +1,16 @@
+version: 1
 services:
   - type: web
-    name: whatsapp-link-api
+    name: whatsmultiapi
     env: node
     buildCommand: npm install
-    startCommand: node index.js
-    plan: free
-    autoDeploy: true
-    healthCheckPath: /health
+    startCommand: npm start
+    disk:
+      name: sessions
+      mountPath: /app/sessions
+      sizeGB: 2
     envVars:
-      - key: NODE_VERSION
-        value: 18.18.0
-      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
-        value: true
-      - key: PUPPETEER_EXECUTABLE_PATH
-        value: /usr/bin/google-chrome
+      - key: PORT
+        value: 10000
+      - key: API_KEY
+        sync: false   # Render dashboard-এ manually set করবে
