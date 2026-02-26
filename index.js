@@ -1,6 +1,6 @@
 // ===================================================
-// BLAST ULTIMATE WHATSAPP API v15.1.0 – FINAL FIXED & ADVANCE
-// Unlimited Messages | 2 Msg/Sec | 500ms Delay | NO API KEY REQUIRED
+// BLAST ULTIMATE WHATSAPP API v15.1.0 – FINAL FIXED
+// Unlimited Messages | 2 Msg/Sec | 500ms Delay | NO AUTH
 // Author: Md Dhaka | Dhaka, BD | 2026
 // ===================================================
 
@@ -21,17 +21,13 @@ const {
   DisconnectReason,
   Browsers,
   fetchLatestWaWebVersion,
-  downloadContentFromMessage,
-  jidNormalizedUser,
-  getContentType,
-  makeCacheableSignalKeyStore,
-  makeInMemoryStore
+  jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const P = require('pino');
 const { EventEmitter } = require('events');
 
-// Increase event listener limit
+// Event listener limit
 EventEmitter.defaultMaxListeners = 200;
 
 // ==================== CONFIG ====================
@@ -43,8 +39,6 @@ const config = {
   messageDelay: 500,
   unlimitedMessages: true,
   reconnectBackoff: parseInt(process.env.RECONNECT_BACKOFF) || 3000,
-  rateLimitWindow: 60000,
-  rateLimitMax: 200,
   sessionsDir: path.join(process.cwd(), 'sessions'),
   tempDir: path.join(process.cwd(), 'temp'),
   useCluster: process.env.USE_CLUSTER === 'true'
@@ -140,7 +134,7 @@ class MessageQueue {
           timestamp: Date.now()
         });
 
-        logger.info(`✅ Sent: ${job.sessionId} -> ${job.jid} | Type: ${job.type}`);
+        logger.info(`✅ Sent: ${job.sessionId} -> ${job.jid}`);
       } catch (error) {
         this.stats.failed++;
         job.reject(error);
@@ -171,9 +165,7 @@ async function createSession(sessionId, phoneNumber = null) {
 
   if (sessions.has(sessionId)) {
     const oldSession = sessions.get(sessionId);
-    if (oldSession.sock) {
-      oldSession.sock.end();
-    }
+    if (oldSession.sock) oldSession.sock.end();
     sessions.delete(sessionId);
   }
 
@@ -211,7 +203,7 @@ async function createSession(sessionId, phoneNumber = null) {
       const statusCode = (lastDisconnect?.error instanceof Boom)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-      logger.warn(`Session ${sessionId} closed with code ${statusCode}`);
+      logger.warn(`Session ${sessionId} closed: ${statusCode}`);
 
       if (shouldReconnect) {
         setTimeout(() => createSession(sessionId, phoneNumber), config.reconnectBackoff);
@@ -273,7 +265,7 @@ async function createSession(sessionId, phoneNumber = null) {
   return sessions.get(sessionId);
 }
 
-// ==================== EXPRESS APP ====================
+// ==================== APP ====================
 const app = express();
 
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -282,54 +274,25 @@ app.use(compression());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// No API key authentication as per request
-
-// Rate Limiting (optional protection)
-const limiter = rateLimit({
-  windowMs: config.rateLimitWindow,
-  max: config.rateLimitMax,
-  message: { success: false, error: 'Too many requests, slow down.' }
-});
-app.use('/api/', limiter);
-
-// Root
 app.get('/', (req, res) => {
   res.json({
     name: 'Blast WhatsApp API',
-    version: '15.1.0-fixed',
+    version: '15.1.0',
     author: 'Md Dhaka',
     status: 'operational',
-    features: {
-      unlimitedMessages: true,
-      messagesPerSecond: config.messagesPerSecond,
-      messageDelay: `${config.messageDelay}ms`,
-      maxSessions: config.maxSessions
-    },
-    endpoints: {
-      createSession: 'POST /api/session/create {sessionId, phone?}',
-      getQR: 'GET /api/session/:id/qr',
-      sendMessage: 'POST /api/send {sessionId, to, message, type?}',
-      bulkSend: 'POST /api/send/bulk {sessionId, messages[]}',
-      status: 'GET /api/session/:id/status',
-      logout: 'POST /api/session/:id/logout',
-      stats: 'GET /api/stats'
-    }
+    message: 'No API key required'
   });
 });
 
-// Health
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     uptime: process.uptime(),
-    sessionsCount: sessions.size,
-    connected: Array.from(sessions.values()).filter(s => s.status === 'CONNECTED').length,
-    queueLength: queue.queue.length,
-    memoryMB: (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)
+    sessions: sessions.size,
+    queue: queue.queue.length
   });
 });
 
-// Create session
 app.post('/api/session/create', async (req, res) => {
   try {
     const { sessionId, phone } = req.body;
@@ -338,11 +301,10 @@ app.post('/api/session/create', async (req, res) => {
     await createSession(sessionId, phone);
     res.json({ success: true, sessionId, status: sessions.get(sessionId).status });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Get QR / Pairing
 app.get('/api/session/:sessionId/qr', (req, res) => {
   const session = sessions.get(req.params.sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -356,156 +318,33 @@ app.get('/api/session/:sessionId/qr', (req, res) => {
   res.json({ success: false, status: session.status });
 });
 
-// Send message
 app.post('/api/send', async (req, res) => {
   try {
-    const { sessionId, to, message, type = 'text', caption, filename } = req.body;
-
-    if (!sessionId || !to || !message) {
-      return res.status(400).json({ error: 'sessionId, to, message required' });
-    }
+    const { sessionId, to, message, type = 'text' } = req.body;
+    if (!sessionId || !to || !message) return res.status(400).json({ error: 'Missing params' });
 
     const session = sessions.get(sessionId);
-    if (!session || session.status !== 'CONNECTED') {
-      return res.status(400).json({ error: 'Session not connected' });
-    }
+    if (!session || session.status !== 'CONNECTED') return res.status(400).json({ error: 'Session not connected' });
 
     const jid = jidNormalizedUser(to.includes('@') ? to : `${to}@s.whatsapp.net`);
 
     let content;
-    switch (type) {
-      case 'text':
-        content = { text: message };
-        break;
-      case 'image':
-        content = { image: { url: message }, caption: caption || '' };
-        break;
-      case 'video':
-        content = { video: { url: message }, caption: caption || '' };
-        break;
-      case 'audio':
-        content = { audio: { url: message } };
-        break;
-      case 'document':
-        content = { document: { url: message }, fileName: filename || 'file' };
-        break;
-      default:
-        return res.status(400).json({ error: 'Invalid message type' });
-    }
+    if (type === 'text') content = { text: message };
+    else if (type === 'image') content = { image: { url: message }, caption: req.body.caption };
+    else if (type === 'video') content = { video: { url: message }, caption: req.body.caption };
+    else if (type === 'audio') content = { audio: { url: message } };
+    else if (type === 'document') content = { document: { url: message }, fileName: req.body.filename || 'file' };
+    else return res.status(400).json({ error: 'Invalid type' });
 
-    const result = await queue.add(sessionId, jid, content, type);
+    await queue.add(sessionId, jid, content, type);
 
-    res.json({
-      success: true,
-      queued: true,
-      messageId: result.messageId,
-      sessionId,
-      to: jid
-    });
+    res.json({ success: true, queued: true });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Bulk send
-app.post('/api/send/bulk', async (req, res) => {
-  try {
-    const { sessionId, messages } = req.body;
-    if (!sessionId || !messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: 'sessionId and messages array required' });
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session || session.status !== 'CONNECTED') {
-      return res.status(400).json({ error: 'Session not connected' });
-    }
-
-    const results = [];
-    for (const msg of messages) {
-      try {
-        const jid = jidNormalizedUser(msg.to.includes('@') ? msg.to : `${msg.to}@s.whatsapp.net`);
-        const content = msg.type === 'text' ? { text: msg.message } : { [msg.type]: { url: msg.message }, caption: msg.caption || '' };
-        await queue.add(sessionId, jid, content, msg.type || 'text');
-        results.push({ to: msg.to, success: true });
-      } catch (e) {
-        results.push({ to: msg.to, success: false, error: e.message });
-      }
-    }
-
-    res.json({ success: true, results });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+app.listen(config.port, async () => {
+  logger.info(`BLAST API v15.1.0 running on port ${config.port}`);
+  logger.info('Md Dhaka – No API key required');
 });
-
-// Logout
-app.post('/api/session/:sessionId/logout', async (req, res) => {
-  const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
-  if (!session) return res.status(404).json({ error: 'Session not found' });
-
-  if (session.sock) {
-    await session.sock.logout().catch(() => {});
-    session.sock.end();
-  }
-  sessions.delete(sessionId);
-  res.json({ success: true, message: 'Logged out' });
-});
-
-// Start server
-if (cluster.isMaster && config.useCluster) {
-  const numCPUs = os.cpus().length;
-  logger.info(`Master ${process.pid} running, forking ${numCPUs} workers`);
-  for (let i = 0; i < numCPUs; i++) cluster.fork();
-
-  cluster.on('exit', (worker, code, signal) => {
-    logger.warn(`Worker ${worker.process.pid} died, restarting...`);
-    cluster.fork();
-  });
-} else {
-  const server = app.listen(config.port, async () => {
-    logger.info('='.repeat(60));
-    logger.info('BLAST WHATSAPP API v15.1.0 – FIXED');
-    logger.info(`Port: ${config.port}`);
-    logger.info(`Max Sessions: ${config.maxSessions}`);
-    logger.info(`Rate: ${config.messagesPerSecond} msg/sec | Delay: ${config.messageDelay}ms`);
-    logger.info('No API Key required');
-    logger.info('='.repeat(60));
-
-    // Load existing sessions
-    const dirs = await fs.readdir(config.sessionsDir);
-    let loaded = 0;
-    for (const dir of dirs) {
-      const stat = await fs.stat(path.join(config.sessionsDir, dir));
-      if (stat.isDirectory()) {
-        try {
-          await createSession(dir);
-          loaded++;
-        } catch (e) {
-          logger.error(`Failed to load ${dir}: ${e.message}`);
-        }
-      }
-    }
-    logger.info(`Loaded ${loaded} sessions`);
-  });
-
-  // Graceful shutdown
-  const shutdown = async () => {
-    logger.info('Shutting down...');
-    for (const [id] of sessions) {
-      const s = sessions.get(id);
-      if (s?.sock) {
-        await s.sock.logout().catch(() => {});
-        s.sock.end();
-      }
-    }
-    server.close(() => {
-      logger.info('Server closed');
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(1), 10000);
-  };
-
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
-}
