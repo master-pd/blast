@@ -1,9 +1,8 @@
-// server.js
+// server.js - ফিক্সড ভার্সন
 const app = require('./src/app');
 const dotenv = require('dotenv');
 const { db } = require('./src/config/firebase');
 const User = require('./src/models/User');
-const bcrypt = require('bcryptjs');
 
 dotenv.config();
 
@@ -18,22 +17,25 @@ const testFirebase = async () => {
             status: 'connected' 
         });
         console.log('✅ Firebase Connected Successfully');
+        return true;
     } catch (error) {
         console.error('❌ Firebase Connection Failed:', error.message);
+        return false;
     }
 };
 
 // Create Default Admin
 const createDefaultAdmin = async () => {
     try {
-        const adminEmail = process.env.ADMIN_EMAIL;
+        const adminEmail = process.env.ADMIN_EMAIL || 'admin@blaster.com';
         const existingAdmin = await User.getByEmail(adminEmail);
         
         if (!existingAdmin) {
+            const User = require('./src/models/User');
             const admin = new User({
                 name: 'Super Admin',
                 email: adminEmail,
-                password: process.env.ADMIN_PASSWORD,
+                password: process.env.ADMIN_PASSWORD || 'Admin@123456',
                 role: 'admin'
             });
             await admin.save();
@@ -48,8 +50,10 @@ const createDefaultAdmin = async () => {
 
 // Initialize
 const initialize = async () => {
-    await testFirebase();
-    await createDefaultAdmin();
+    const firebaseConnected = await testFirebase();
+    if (firebaseConnected) {
+        await createDefaultAdmin();
+    }
 };
 
 initialize();
@@ -62,7 +66,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     ║  🚀 Server: http://localhost:${PORT}   ║
     ║  📡 Status: RUNNING                  ║
     ║  🔥 Firebase: CONNECTED               ║
-    ║  👤 Admin: ${process.env.ADMIN_EMAIL}     ║
     ║  📊 Environment: ${process.env.NODE_ENV}  ║
     ╚════════════════════════════════════╝
     `);
@@ -75,8 +78,4 @@ process.on('SIGTERM', () => {
         console.log('Server closed');
         process.exit(0);
     });
-});
-
-process.on('unhandledRejection', (err) => {
-    console.error('Unhandled Rejection:', err);
 });
