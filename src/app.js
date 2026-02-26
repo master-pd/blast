@@ -1,9 +1,8 @@
-// src/app.js
+// src/app.js - auth middleware সরিয়ে ফেলুন
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const path = require('path');
 
 const authRoutes = require('./routes/authRoutes');
 const accountRoutes = require('./routes/accountRoutes');
@@ -20,7 +19,7 @@ app.use(helmet({
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type']
 }));
 
 // Rate Limiting
@@ -44,7 +43,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// API Routes
+// API Routes - কোন auth middleware নেই
 app.use('/api/auth', authRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/messages', messageRoutes);
@@ -55,32 +54,33 @@ app.get('/api', (req, res) => {
         success: true,
         name: 'Blaster API',
         version: '1.0.0',
-        description: 'WhatsApp Account Rental & Blasting System',
-        authentication: 'Bearer Token required',
+        description: 'WhatsApp Account Rental & Blasting System (Public API)',
+        authentication: 'No token required - Public API',
         endpoints: {
             auth: {
                 register: 'POST /api/auth/register',
                 login: 'POST /api/auth/login',
-                profile: 'GET /api/auth/profile'
+                profile: 'GET /api/auth/profile/:userId'
             },
             accounts: {
-                add: 'POST /api/accounts/add',
-                myAccounts: 'GET /api/accounts/my',
+                add: 'POST /api/accounts/add (send userId in body)',
+                myAccounts: 'GET /api/accounts/my/:userId',
                 getQR: 'GET /api/accounts/qr/:accountId',
-                offerForRent: 'POST /api/accounts/offer/:accountId',
-                remove: 'DELETE /api/accounts/:accountId'
+                offerForRent: 'POST /api/accounts/offer/:accountId (send userId in body)',
+                remove: 'DELETE /api/accounts/:accountId (send userId in body)'
             },
             admin: {
                 pendingRentals: 'GET /api/accounts/pending',
                 availableAccounts: 'GET /api/accounts/available',
-                rentedAccounts: 'GET /api/accounts/rented',
+                rentedAccounts: 'GET /api/accounts/rented/:adminId',
                 approveAccount: 'POST /api/accounts/approve/:accountId',
                 rentAccount: 'POST /api/accounts/rent/:accountId',
                 returnAccount: 'POST /api/accounts/return/:accountId'
             },
             messages: {
-                blast: 'POST /api/messages/blast',
-                history: 'GET /api/messages/history',
+                blast: 'POST /api/messages/blast (send adminId in body)',
+                send: 'POST /api/messages/send (send adminId in body)',
+                history: 'GET /api/messages/history/:adminId',
                 status: 'GET /api/messages/status/:messageId'
             }
         }
