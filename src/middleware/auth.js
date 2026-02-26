@@ -9,7 +9,7 @@ const auth = async (req, res, next) => {
         if (!token) {
             return res.status(401).json({ 
                 success: false, 
-                error: 'Authentication required' 
+                error: 'Authentication required. Please provide a token.' 
             });
         }
 
@@ -27,9 +27,21 @@ const auth = async (req, res, next) => {
         req.token = token;
         next();
     } catch (error) {
+        if (error.name === 'JsonWebTokenError') {
+            return res.status(401).json({ 
+                success: false, 
+                error: 'Invalid token' 
+            });
+        }
+        if (error.name === 'TokenExpiredError') {
+            return res.status(401).json({ 
+                success: false, 
+                error: 'Token expired' 
+            });
+        }
         res.status(401).json({ 
             success: false, 
-            error: 'Invalid or expired token' 
+            error: 'Authentication failed' 
         });
     }
 };
