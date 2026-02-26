@@ -1,7 +1,6 @@
 {
-  "name": "blast-advanced-whatsapp-api",
-  "version": "4.0.0",
-  "description": "Advanced Multi-Session WhatsApp REST API - Professional 2026 Edition",
+  "name": "blast-pro-whatsapp-api-2026",
+  "version": "6.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -15,7 +14,8 @@
     "express-rate-limit": "^7.4.0",
     "bull": "^4.16.5",
     "axios": "^1.7.7",
-    "pino": "^9.0.0"
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0"
   },
   "engines": {
     "node": ">=20"
