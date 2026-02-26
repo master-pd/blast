@@ -1,17 +1,18 @@
-// Blast WhatsApp Multi-Session REST API v7.1-final – Production Ready
-// Clean Version - Only Essential Features
+// ===================================================
+// BLAST ULTIMATE WHATSAPP API – FINAL COMPLETE v16.0.0
+// No API Key | Unlimited Messages | 2 msg/sec | 500ms Delay
+// Author: Md Dhaka | Dhaka, BD | 2026
+// ===================================================
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
-const fs = require('fs');
+const fs = require('fs-extra');
 const path = require('path');
-const axios = require('axios');
-const rateLimit = require('express-rate-limit');
-const Queue = require('bull');
-const pino = require('pino');
-const pretty = require('pino-pretty');
+const crypto = require('crypto');
+const compression = require('compression');
+const helmet = require('helmet');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -21,537 +22,324 @@ const {
   proto,
   prepareWAMessageMedia,
   generateWAMessageFromContent,
-  downloadContentFromMessage,
-  jidNormalizedUser,
-  jidDecode,
-  getContentType
+  jidNormalizedUser
 } = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
+const P = require('pino');
 
-const app = express();
+// ==================== CONFIG ====================
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || 'your-secret-key-here';
-const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
-const DAILY_MSG_LIMIT = parseInt(process.env.DAILY_MSG_LIMIT || '1000');
-const QUEUE_DELAY_MIN = parseInt(process.env.QUEUE_DELAY_MIN || '1000');
-const QUEUE_DELAY_MAX = parseInt(process.env.QUEUE_DELAY_MAX || '3000');
+const SESSIONS_DIR = path.join(process.cwd(), 'sessions');
+const MAX_SESSIONS = parseInt(process.env.MAX_SESSIONS) || 500;
+const MSG_PER_SEC = 2;
+const MIN_DELAY_MS = 500;
 
-const logger = pino(
-  { level: process.env.LOG_LEVEL || 'info' },
-  pretty({ colorize: true, translateTime: 'SYS:dd-mm-yyyy HH:MM:ss' })
-);
+fs.ensureDirSync(SESSIONS_DIR);
 
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// ==================== LOGGER ====================
+const logger = P({
+  level: 'info',
+  timestamp: () => `,"time":"${new Date().toISOString()}"`
+});
 
-const SESSIONS_DIR = path.join(__dirname, 'sessions');
-if (!fs.existsSync(SESSIONS_DIR)) {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+if (process.env.NODE_ENV !== 'production') {
+  const pretty = require('pino-pretty');
+  logger.stream = pretty({ colorize: true });
 }
 
+// ==================== QUEUE SYSTEM ====================
+class BlastQueue {
+  constructor() {
+    this.queue = [];
+    this.processing = false;
+    this.lastSend = 0;
+    this.msgThisSec = 0;
+    this.secStart = Date.now();
+  }
+
+  add(sessionId, jid, content, type = 'text') {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ sessionId, jid, content, type, resolve, reject });
+      this.process();
+    });
+  }
+
+  async process() {
+    if (this.processing || !this.queue.length) return;
+    this.processing = true;
+
+    while (this.queue.length) {
+      const now = Date.now();
+
+      // Reset per-second counter
+      if (now - this.secStart >= 1000) {
+        this.msgThisSec = 0;
+        this.secStart = now;
+      }
+
+      if (this.msgThisSec >= MSG_PER_SEC) {
+        const wait = 1000 - (now - this.secStart) + 50;
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+
+      const elapsed = now - this.lastSend;
+      if (elapsed < MIN_DELAY_MS) {
+        await new Promise(r => setTimeout(r, MIN_DELAY_MS - elapsed));
+      }
+
+      const job = this.queue.shift();
+
+      try {
+        const s = sessions.get(job.sessionId);
+        if (!s || s.status !== 'CONNECTED') throw new Error('Session offline');
+
+        await s.sock.presenceSubscribe(job.jid);
+        await s.sock.sendPresenceUpdate('composing', job.jid);
+        await new Promise(r => setTimeout(r, 700 + Math.random() * 900));
+
+        await s.sock.sendMessage(job.jid, job.content);
+
+        this.msgThisSec++;
+        this.lastSend = Date.now();
+        s.stats.totalSent++;
+
+        job.resolve({ success: true, type: job.type });
+      } catch (e) {
+        job.reject(e);
+        logger.error(`Send failed: ${e.message}`);
+      }
+    }
+
+    this.processing = false;
+  }
+}
+
+const queue = new BlastQueue();
+
+// ==================== SESSIONS ====================
 const sessions = new Map();
 
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-  message: { success: false, error: 'Too many requests' }
-});
+async function createSession(id, phone = null) {
+  if (sessions.size >= MAX_SESSIONS) throw new Error('Max sessions reached');
 
-app.use('/api/', apiLimiter);
+  const authPath = path.join(SESSIONS_DIR, id);
+  await fs.ensureDir(authPath);
 
-// Message Queue
-const msgQueue = new Queue('blast-message-queue', {
-  redis: { host: '127.0.0.1', port: 6379 },
-  defaultJobOptions: { 
-    removeOnComplete: true, 
-    removeOnFail: true, 
-    attempts: 3 
-  }
-});
-
-msgQueue.process(async (job) => {
-  const { sessionId, jid, content } = job.data;
-  const session = sessions.get(sessionId);
-
-  if (!session || session.status !== 'CONNECTED') {
-    throw new Error('Session not connected');
-  }
-
-  if (session.stats.sentToday >= DAILY_MSG_LIMIT) {
-    throw new Error('Daily limit reached');
-  }
-
-  try {
-    await session.sock.sendMessage(jid, content);
-    session.stats.sentToday++;
-    session.stats.totalSent++;
-    session.lastActive = Date.now();
-    logger.info(`Message sent: ${sessionId} -> ${jid}`);
-  } catch (err) {
-    logger.error(`Send failed: ${err.message}`);
-    throw err;
-  }
-});
-
-// Auth Middleware
-const authMiddleware = (req, res, next) => {
-  const key = req.headers['x-api-key'] || req.query.api_key;
-  if (!key || key !== API_KEY) {
-    return res.status(401).json({ success: false, error: 'Invalid API Key' });
-  }
-  next();
-};
-
-// Session Management
-async function createOrLoadSession(sessionId, phoneNumber = null) {
-  if (sessions.has(sessionId)) {
-    const s = sessions.get(sessionId);
-    if (s.status === 'CONNECTED') return s.sock;
-  }
-
-  const authPath = path.join(SESSIONS_DIR, sessionId);
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
   const version = (await fetchLatestWaWebVersion()).version;
 
   const sock = makeWASocket({
     version,
-    logger: pino({ level: 'silent' }),
+    logger: P({ level: 'silent' }),
     printQRInTerminal: false,
     auth: state,
-    browser: Browsers.macOS('Safari'),
+    browser: Browsers.macOS('Chrome'),
     markOnlineOnConnect: true
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      const qrBase64 = await qrcode.toDataURL(qr);
-      sessions.set(sessionId, { 
-        ...sessions.get(sessionId), 
-        qr: qrBase64, 
-        status: 'QR_READY' 
-      });
+  sock.ev.on('connection.update', async (upd) => {
+    if (upd.qr) {
+      const qr64 = await qrcode.toDataURL(upd.qr);
+      sessions.set(id, { ...sessions.get(id), qr: qr64, status: 'QR_READY' });
     }
 
-    if (connection === 'close') {
-      const statusCode = (lastDisconnect?.error instanceof Boom)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-      if (shouldReconnect) {
-        setTimeout(() => createOrLoadSession(sessionId, phoneNumber), 5000);
-      } else {
-        sessions.delete(sessionId);
-      }
+    if (upd.connection === 'open') {
+      sessions.set(id, { ...sessions.get(id), sock, status: 'CONNECTED', qr: null });
+      logger.info(`Session ${id} connected`);
     }
 
-    if (connection === 'open') {
-      sessions.set(sessionId, {
-        ...sessions.get(sessionId),
-        sock,
-        status: 'CONNECTED',
-        qr: null,
-        pairingCode: null,
-        lastActive: Date.now(),
-        stats: sessions.get(sessionId)?.stats || {
-          sentToday: 0,
-          totalSent: 0,
-          received: 0
-        }
-      });
-      logger.info(`Session ${sessionId} connected`);
-      
-      if (WEBHOOK_URL) {
-        axios.post(WEBHOOK_URL, { event: 'connected', sessionId }).catch(() => {});
-      }
+    if (upd.connection === 'close' && !(upd.lastDisconnect?.error instanceof Boom)?.output?.statusCode === DisconnectReason.loggedOut) {
+      setTimeout(() => createSession(id, phone), 3000);
     }
   });
 
-  // Incoming messages
-  sock.ev.on('messages.upsert', async (m) => {
-    if (m.type !== 'notify') return;
-    
-    const msg = m.messages[0];
-    if (!msg.key.fromMe) {
-      const session = sessions.get(sessionId);
-      if (session) {
-        session.stats.received++;
-        session.lastActive = Date.now();
-      }
-      
-      if (WEBHOOK_URL) {
-        axios.post(WEBHOOK_URL, { 
-          event: 'message', 
-          sessionId, 
-          from: msg.key.remoteJid,
-          message: msg.message 
-        }).catch(() => {});
-      }
-    }
-  });
-
-  // Pairing code
-  if (phoneNumber) {
-    try {
-      const code = await sock.requestPairingCode(phoneNumber.replace(/[^0-9]/g, ''));
-      sessions.set(sessionId, { 
-        ...sessions.get(sessionId), 
-        pairingCode: code,
-        status: 'PAIRING_CODE_READY'
-      });
-    } catch (e) {
-      logger.error(`Pairing failed: ${e.message}`);
-    }
-  }
-
-  sessions.set(sessionId, {
+  sessions.set(id, {
     sock,
     status: 'INITIALIZING',
     qr: null,
-    pairingCode: null,
-    stats: { sentToday: 0, totalSent: 0, received: 0 },
-    lastActive: Date.now()
+    stats: { totalSent: 0, received: 0 }
   });
 
-  return sock;
-}
-
-// Load saved sessions on startup
-async function loadSessionsOnStart() {
-  const dirs = fs.readdirSync(SESSIONS_DIR);
-  for (const dir of dirs) {
-    const stat = fs.statSync(path.join(SESSIONS_DIR, dir));
-    if (stat.isDirectory()) {
-      createOrLoadSession(dir).catch(err => {
-        logger.error(`Failed to load session ${dir}: ${err.message}`);
-      });
-    }
+  if (phone) {
+    const code = await sock.requestPairingCode(phone.replace(/[^0-9]/g, ''));
+    sessions.set(id, { ...sessions.get(id), pairingCode: code });
   }
+
+  return sessions.get(id);
 }
 
-// ==================== API ROUTES ====================
+// ==================== EXPRESS APP ====================
+const app = express();
 
-// Home
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(cors({ origin: '*' }));
+app.use(compression());
+app.use(express.json({ limit: '100mb' }));
+
+// ==================== ROUTES ====================
+
 app.get('/', (req, res) => {
   res.json({
-    name: 'Blast WhatsApp API',
-    version: '7.1-final',
-    status: 'online',
-    endpoints: [
-      'GET    /health',
-      'GET    /api/sessions',
-      'POST   /api/session/create',
-      'GET    /api/session/:id/qr',
-      'GET    /api/session/:id/status',
-      'POST   /api/session/:id/logout',
-      'POST   /api/send/text',
-      'POST   /api/send/media',
-      'POST   /api/send/bulk'
-    ],
-    auth: 'x-api-key header required'
+    name: 'Blast WhatsApp API – Final v16.0.0',
+    status: 'live',
+    author: 'Md Dhaka',
+    message: 'No authentication required – use freely'
   });
 });
 
-// Health check
-app.get('/health', (req, res) => {
-  const connectedSessions = Array.from(sessions.values()).filter(s => s.status === 'CONNECTED').length;
-  
+// Create session
+app.post('/api/session/create', async (req, res) => {
+  const { id, phone } = req.body;
+  if (!id) return res.status(400).json({ error: 'id required' });
+
+  try {
+    await createSession(id, phone);
+    res.json({ success: true, id, status: sessions.get(id).status });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get QR or Pairing Code
+app.get('/api/session/:id/qr', (req, res) => {
+  const s = sessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session not found' });
+
+  if (s.qr) return res.json({ method: 'qr', qr: s.qr });
+  if (s.pairingCode) return res.json({ method: 'pairing', code: s.pairingCode });
+  res.json({ status: s.status });
+});
+
+// Send text
+app.post('/api/send/text', async (req, res) => {
+  const { id, to, text } = req.body;
+  const s = sessions.get(id);
+  if (!s || s.status !== 'CONNECTED') return res.status(400).json({ error: 'Session not ready' });
+
+  const jid = jidNormalizedUser(to + '@s.whatsapp.net');
+  await queue.add(id, jid, { text }, 'text');
+  res.json({ success: true });
+});
+
+// Send poll
+app.post('/api/send/poll', async (req, res) => {
+  const { id, to, name, values } = req.body;
+  const jid = jidNormalizedUser(to + '@s.whatsapp.net');
+  const content = {
+    pollCreationMessage: {
+      name,
+      options: values.map(v => ({ optionName: v })),
+      selectableCount: 1
+    }
+  };
+  await queue.add(id, jid, content, 'poll');
+  res.json({ success: true });
+});
+
+// Send button message
+app.post('/api/send/button', async (req, res) => {
+  const { id, to, text, buttons } = req.body;
+  const jid = jidNormalizedUser(to + '@s.whatsapp.net');
+  const content = {
+    buttonsMessage: {
+      contentText: text,
+      footerText: 'Blast API',
+      buttons: buttons.map(b => ({
+        buttonId: b.id || crypto.randomBytes(4).toString('hex'),
+        buttonText: { displayText: b.text },
+        type: 1
+      })),
+      headerType: 1
+    }
+  };
+  await queue.add(id, jid, content, 'button');
+  res.json({ success: true });
+});
+
+// Send location
+app.post('/api/send/location', async (req, res) => {
+  const { id, to, lat, lng, name = '', address = '' } = req.body;
+  const jid = jidNormalizedUser(to + '@s.whatsapp.net');
+  const content = {
+    locationMessage: {
+      degreesLatitude: lat,
+      degreesLongitude: lng,
+      name,
+      address
+    }
+  };
+  await queue.add(id, jid, content, 'location');
+  res.json({ success: true });
+});
+
+// Send voice note (audio PTT)
+app.post('/api/send/voice', async (req, res) => {
+  const { id, to, url } = req.body;
+  const jid = jidNormalizedUser(to + '@s.whatsapp.net');
+  const content = {
+    audio: { url },
+    ptt: true,
+    mimetype: 'audio/ogg; codecs=opus'
+  };
+  await queue.add(id, jid, content, 'voice');
+  res.json({ success: true });
+});
+
+// Send status/story
+app.post('/api/send/status', async (req, res) => {
+  const { id, type, content } = req.body;
+  const jid = 'status@broadcast';
+  let msgContent;
+
+  if (type === 'text') {
+    msgContent = { text: content };
+  } else if (type === 'image') {
+    msgContent = { image: { url: content }, caption: req.body.caption || '' };
+  } else if (type === 'video') {
+    msgContent = { video: { url: content }, caption: req.body.caption || '' };
+  }
+
+  await queue.add(id, jid, msgContent, 'status');
+  res.json({ success: true });
+});
+
+// Delete message
+app.post('/api/delete', async (req, res) => {
+  const { id, to, messageId, forEveryone = true } = req.body;
+  const s = sessions.get(id);
+  if (!s) return res.status(400).json({ error: 'Session not found' });
+
+  const jid = jidNormalizedUser(to + '@s.whatsapp.net');
+  await s.sock.sendMessage(jid, {
+    delete: { remoteJid: jid, fromMe: true, id: messageId }
+  });
+  res.json({ success: true });
+});
+
+// Create group
+app.post('/api/group/create', async (req, res) => {
+  const { id, subject, participants } = req.body;
+  const s = sessions.get(id);
+  if (!s) return res.status(400).json({ error: 'Session not found' });
+
+  const group = await s.sock.groupCreate(subject, participants.map(p => jidNormalizedUser(p + '@s.whatsapp.net')));
+  res.json({ success: true, groupId: group.id, inviteCode: group.inviteCode });
+});
+
+// Health & Stats
+app.get('/api/health', (req, res) => {
+  const active = Array.from(sessions.values()).filter(s => s.status === 'CONNECTED').length;
   res.json({
     status: 'healthy',
-    uptime: process.uptime(),
-    sessions: {
-      total: sessions.size,
-      connected: connectedSessions
-    },
-    memory: process.memoryUsage().heapUsed / 1024 / 1024 + 'MB'
+    sessions: { total: sessions.size, connected: active },
+    queue: { length: queue.queue.length },
+    uptime: process.uptime()
   });
 });
 
-// List all sessions
-app.get('/api/sessions', authMiddleware, (req, res) => {
-  const sessionList = Array.from(sessions.entries()).map(([id, data]) => ({
-    id,
-    status: data.status,
-    stats: data.stats,
-    lastActive: data.lastActive,
-    hasQR: !!data.qr,
-    hasPairingCode: !!data.pairingCode
-  }));
-
-  res.json({
-    success: true,
-    total: sessionList.length,
-    sessions: sessionList
-  });
-});
-
-// Create new session
-app.post('/api/session/create', authMiddleware, async (req, res) => {
-  try {
-    const { sessionId, phone } = req.body;
-
-    if (!sessionId) {
-      return res.status(400).json({ success: false, error: 'sessionId required' });
-    }
-
-    if (sessions.has(sessionId)) {
-      return res.status(409).json({ success: false, error: 'Session already exists' });
-    }
-
-    await createOrLoadSession(sessionId, phone);
-
-    res.json({
-      success: true,
-      sessionId,
-      method: phone ? 'pairing_code' : 'qr',
-      message: phone ? 'Check pairing code via /qr endpoint' : 'Scan QR code via /qr endpoint'
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Get session QR/Pairing Code
-app.get('/api/session/:sessionId/qr', authMiddleware, (req, res) => {
-  const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
-
-  if (!session) {
-    return res.status(404).json({ success: false, error: 'Session not found' });
-  }
-
-  if (session.pairingCode) {
-    res.json({ 
-      success: true, 
-      method: 'pairing_code',
-      code: session.pairingCode 
-    });
-  } else if (session.qr) {
-    res.json({ 
-      success: true, 
-      method: 'qr',
-      qr: session.qr 
-    });
-  } else {
-    res.json({ 
-      success: false, 
-      error: 'Not ready yet',
-      status: session.status 
-    });
-  }
-});
-
-// Get session status
-app.get('/api/session/:sessionId/status', authMiddleware, (req, res) => {
-  const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
-
-  if (!session) {
-    return res.status(404).json({ success: false, error: 'Session not found' });
-  }
-
-  res.json({
-    success: true,
-    sessionId,
-    status: session.status,
-    stats: session.stats,
-    lastActive: session.lastActive
-  });
-});
-
-// Logout session
-app.post('/api/session/:sessionId/logout', authMiddleware, async (req, res) => {
-  const { sessionId } = req.params;
-  const session = sessions.get(sessionId);
-
-  if (!session) {
-    return res.status(404).json({ success: false, error: 'Session not found' });
-  }
-
-  try {
-    if (session.sock) {
-      await session.sock.logout();
-      session.sock.end();
-    }
-    sessions.delete(sessionId);
-    
-    // Clean up auth folder
-    const authPath = path.join(SESSIONS_DIR, sessionId);
-    if (fs.existsSync(authPath)) {
-      fs.rmSync(authPath, { recursive: true, force: true });
-    }
-
-    res.json({ success: true, message: 'Logged out' });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Send text message
-app.post('/api/send/text', authMiddleware, async (req, res) => {
-  try {
-    const { sessionId, to, message } = req.body;
-
-    if (!sessionId || !to || !message) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'sessionId, to, and message required' 
-      });
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session || session.status !== 'CONNECTED') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Session not connected' 
-      });
-    }
-
-    if (session.stats.sentToday >= DAILY_MSG_LIMIT) {
-      return res.status(429).json({ 
-        success: false, 
-        error: 'Daily message limit reached' 
-      });
-    }
-
-    const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
-
-    const job = await msgQueue.add({
-      sessionId,
-      jid,
-      content: { text: message }
-    });
-
-    res.json({
-      success: true,
-      queued: true,
-      jobId: job.id,
-      message: 'Message queued for sending'
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Send media message
-app.post('/api/send/media', authMiddleware, async (req, res) => {
-  try {
-    const { sessionId, to, type, url, caption } = req.body;
-
-    if (!sessionId || !to || !type || !url) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'sessionId, to, type, url required' 
-      });
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session || session.status !== 'CONNECTED') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Session not connected' 
-      });
-    }
-
-    const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
-
-    // Download media from URL
-    const response = await axios.get(url, { responseType: 'arraybuffer' });
-    const mediaBuffer = Buffer.from(response.data);
-
-    let mediaMessage;
-    if (type === 'image') {
-      mediaMessage = { image: mediaBuffer, caption };
-    } else if (type === 'video') {
-      mediaMessage = { video: mediaBuffer, caption };
-    } else if (type === 'audio') {
-      mediaMessage = { audio: mediaBuffer };
-    } else if (type === 'document') {
-      mediaMessage = { document: mediaBuffer, fileName: caption || 'file' };
-    }
-
-    const job = await msgQueue.add({
-      sessionId,
-      jid,
-      content: mediaMessage
-    });
-
-    res.json({
-      success: true,
-      queued: true,
-      jobId: job.id
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Bulk send messages
-app.post('/api/send/bulk', authMiddleware, async (req, res) => {
-  try {
-    const { sessionId, messages } = req.body;
-
-    if (!sessionId || !messages || !messages.length) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'sessionId and messages array required' 
-      });
-    }
-
-    const session = sessions.get(sessionId);
-    if (!session || session.status !== 'CONNECTED') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Session not connected' 
-      });
-    }
-
-    const jobs = [];
-    for (const msg of messages) {
-      if (session.stats.sentToday >= DAILY_MSG_LIMIT) break;
-
-      const jid = msg.to.includes('@') ? msg.to : `${msg.to}@s.whatsapp.net`;
-      
-      const job = await msgQueue.add({
-        sessionId,
-        jid,
-        content: msg.type === 'text' 
-          ? { text: msg.content }
-          : { [msg.type]: msg.content }
-      });
-      
-      jobs.push(job.id);
-      
-      // Small delay between queue adds
-      await new Promise(r => setTimeout(r, 200));
-    }
-
-    res.json({
-      success: true,
-      queued: jobs.length,
-      jobIds: jobs
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ==================== START SERVER ====================
 app.listen(PORT, async () => {
-  logger.info(`🚀 Blast WhatsApp API v7.1-final`);
-  logger.info(`📱 Server running on port ${PORT}`);
-  logger.info(`🔑 API Key: ${API_KEY.substring(0, 5)}...`);
-  
-  await loadSessionsOnStart();
-  logger.info(`✅ Loaded saved sessions`);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('Shutting down...');
-  msgQueue.close();
-  process.exit(0);
+  logger.info(`Blast API v16.0.0 running on port ${PORT} – No authentication`);
+  logger.info('Ready for production – Md Dhaka');
 });
