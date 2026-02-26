@@ -1,32 +1,24 @@
 {
-  "name": "blast-whatsapp-api",
-  "version": "15.0.0",
-  "description": "Ultimate WhatsApp Multi-Session REST API",
-  "main": "server.js",
+  "name": "blast-whatsapp-api-final-2026",
+  "version": "15.2.0",
+  "description": "Ultimate Multi-Session WhatsApp API – Md Dhaka – Production Ready – No Auth",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "prod": "NODE_ENV=production node server.js",
-    "cluster": "USE_CLUSTER=true node server.js",
-    "pm2": "pm2 start server.js --name blast-api -i max",
-    "monitor": "pm2 monit"
+    "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.2",
-    "@hapi/boom": "^10.0.1",
-    "express": "^4.18.2",
+    "@whiskeysockets/baileys": "^7.0.0",
+    "express": "^4.21.0",
+    "qrcode": "^1.5.4",
+    "dotenv": "^16.4.5",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "qrcode": "^1.5.3",
-    "fs-extra": "^11.1.1",
-    "axios": "^1.6.0",
-    "express-rate-limit": "^7.1.0",
-    "compression": "^1.7.4",
+    "compression": "^1.7.5",
     "helmet": "^7.1.0",
-    "pino": "^8.16.0",
-    "pino-pretty": "^10.2.3",
-    "crypto": "^1.0.1"
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "fs-extra": "^11.2.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20"
   }
 }
