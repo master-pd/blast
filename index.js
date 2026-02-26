@@ -4,43 +4,36 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const qrcode = require('qrcode-terminal');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// =============================================
-// মিডলওয়্যার
-// =============================================
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // =============================================
-// ডাটাবেস সেটআপ (JSON ফাইল)
+// ডাটাবেস সেটআপ
 // =============================================
 const DB_PATH = path.join(__dirname, 'database.json');
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 
-// সেশন ডিরেক্টরি তৈরি
 if (!fs.existsSync(SESSIONS_DIR)) {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
-// ডাটাবেস ফাংশন
 function loadDatabase() {
     try {
         if (fs.existsSync(DB_PATH)) {
-            const data = fs.readFileSync(DB_PATH, 'utf8');
-            return JSON.parse(data);
+            return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
         }
     } catch (error) {
         console.error('⚠️ ডাটাবেস লোড করতে সমস্যা:', error.message);
     }
-    
-    // ডিফল্ট ডাটাবেস
     return {
-        pairingCodes: {},      // 8-ডিজিটের কোড
-        sessions: {},          // সংযুক্ত সেশন
+        pairingRequests: {},
+        sessions: {},
         stats: {
             totalMessages: 0,
             totalSessions: 0,
@@ -57,44 +50,22 @@ function saveDatabase(data) {
     }
 }
 
-// ডাটাবেস ইনিশিয়ালাইজ
 let db = loadDatabase();
 
 // =============================================
-// ইউটিলিটি ফাংশন
-// =============================================
-
-// 8-ডিজিটের পেয়ারিং কোড জেনারেট
-function generatePairingCode() {
-    return crypto.randomInt(10000000, 99999999).toString();
-}
-
-// ফোন নম্বর ফরম্যাট করুন
-function formatPhoneNumber(number) {
-    let cleaned = number.replace(/\D/g, '');
-    if (!cleaned.startsWith('88')) {
-        cleaned = '88' + cleaned;
-    }
-    return cleaned;
-}
-
-// =============================================
-// WhatsApp ম্যানেজার ক্লাস
+// WhatsApp ম্যানেজার ক্লাস (সঠিক ভার্সন)
 // =============================================
 class WhatsAppManager {
     constructor() {
         this.clients = {};
         this.readyStates = {};
-        this.pairingCodes = db.pairingCodes || {};
+        this.pairingRequests = db.pairingRequests || {};
         
         console.log('\n🤖 WhatsApp ম্যানেজার চালু হচ্ছে...');
         console.log(`📊 সংযুক্ত সেশন: ${Object.keys(db.sessions).length}`);
         
-        // আগের সেশনগুলো লোড করুন
         this.loadSessions();
-        
-        // প্রতি মিনিটে মেয়াদোত্তীর্ণ কোড ক্লিনআপ
-        setInterval(() => this.cleanupExpiredCodes(), 60000);
+        setInterval(() => this.cleanupExpiredRequests(), 60000);
     }
     
     loadSessions() {
@@ -105,90 +76,177 @@ class WhatsAppManager {
         });
     }
     
-    // নতুন পেয়ারিং কোড তৈরি করুন
-    createPairingCode() {
-        const code = generatePairingCode();
-        const expiresAt = Date.now() + (5 * 60 * 1000); // 5 মিনিট
-        
-        this.pairingCodes[code] = {
-            code,
-            createdAt: Date.now(),
-            expiresAt,
-            status: 'pending'
-        };
-        
-        // ডাটাবেস আপডেট
-        db.pairingCodes = this.pairingCodes;
-        saveDatabase(db);
-        
-        return {
-            success: true,
-            code,
-            expiresIn: '5 minutes',
-            instructions: 'WhatsApp → Linked Devices → Link with number instead → এই কোড দিন'
-        };
-    }
-    
-    // পেয়ারিং কোড ভেরিফাই
-    verifyPairingCode(code) {
-        const pairingData = this.pairingCodes[code];
-        
-        if (!pairingData) {
-            return { valid: false, error: '❌ ভুল কোড' };
-        }
-        
-        if (pairingData.status !== 'pending') {
-            return { valid: false, error: '❌ কোড ইতিমধ্যে ব্যবহার করা হয়েছে' };
-        }
-        
-        if (Date.now() > pairingData.expiresAt) {
-            delete this.pairingCodes[code];
-            db.pairingCodes = this.pairingCodes;
-            saveDatabase(db);
-            return { valid: false, error: '❌ কোডের মেয়াদ শেষ' };
-        }
-        
-        return { valid: true, pairingData };
-    }
-    
-    // পেয়ারিং কোড ব্যবহার করে সেশন তৈরি
-    async createSessionWithCode(code, phoneNumber, deviceName = 'WhatsApp Device') {
+    // **সঠিক পদ্ধতি: WhatsApp-এ পেয়ারিং কোড রিকোয়েস্ট করুন**
+    async createPairingCode(phoneNumber) {
         try {
-            const verification = this.verifyPairingCode(code);
-            if (!verification.valid) {
-                return verification;
+            // ফোন নম্বর ফরম্যাট করুন (কান্ট্রি কোড সহ, + ছাড়া)
+            let formattedNumber = phoneNumber.replace(/\D/g, '');
+            
+            // ইউনিক রিকোয়েস্ট আইডি তৈরি
+            const requestId = `req_${Date.now()}_${crypto.randomInt(1000, 9999)}`;
+            
+            // টেম্পোরারি ক্লায়েন্ট তৈরি করুন শুধু পেয়ারিং কোড জেনারেটের জন্য
+            const tempClient = new Client({
+                authStrategy: new LocalAuth({
+                    clientId: `temp_${requestId}`,
+                    dataPath: SESSIONS_DIR
+                }),
+                puppeteer: {
+                    headless: true,
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
+                }
+            });
+            
+            let pairingCode = null;
+            let codeGenerated = false;
+            
+            // পেয়ারিং কোড ইভেন্ট
+            tempClient.on('pairing-code', (code) => {
+                console.log(`🔑 পেয়ারিং কোড জেনারেট হয়েছে: ${code}`);
+                pairingCode = code;
+                codeGenerated = true;
+                
+                // রিকোয়েস্ট ডাটাবেজে সংরক্ষণ
+                this.pairingRequests[requestId] = {
+                    requestId,
+                    phoneNumber: formattedNumber,
+                    pairingCode: code,
+                    createdAt: Date.now(),
+                    expiresAt: Date.now() + (5 * 60 * 1000), // 5 মিনিট
+                    status: 'pending',
+                    tempClientId: `temp_${requestId}`
+                };
+                
+                db.pairingRequests = this.pairingRequests;
+                saveDatabase(db);
+            });
+            
+            // ক্লায়েন্ট রেডি হলে
+            tempClient.on('ready', async () => {
+                console.log(`📱 টেম্পোরারি ক্লায়েন্ট রেডি: ${formattedNumber}`);
+                
+                // যদি পেয়ারিং কোড এখনও জেনারেট না হয়ে থাকে, তাহলে রিকোয়েস্ট করুন
+                if (!codeGenerated) {
+                    try {
+                        // **মূল লাইন: WhatsApp-এ পেয়ারিং কোড রিকোয়েস্ট করুন**
+                        pairingCode = await tempClient.requestPairingCode(formattedNumber);
+                        console.log(`🔑 পেয়ারিং কোড পেয়েছি: ${pairingCode}`);
+                        
+                        this.pairingRequests[requestId] = {
+                            requestId,
+                            phoneNumber: formattedNumber,
+                            pairingCode,
+                            createdAt: Date.now(),
+                            expiresAt: Date.now() + (5 * 60 * 1000),
+                            status: 'pending',
+                            tempClientId: `temp_${requestId}`
+                        };
+                        
+                        db.pairingRequests = this.pairingRequests;
+                        saveDatabase(db);
+                    } catch (error) {
+                        console.error('❌ পেয়ারিং কোড রিকোয়েস্ট করতে সমস্যা:', error);
+                    }
+                }
+            });
+            
+            // ক্লায়েন্ট ইনিশিয়ালাইজ করুন
+            await tempClient.initialize();
+            
+            // ১০ সেকেন্ড পর্যন্ত অপেক্ষা করুন কোড জেনারেট হওয়ার জন্য
+            let waitCount = 0;
+            while (!pairingCode && waitCount < 20) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+                waitCount++;
             }
             
-            const formattedNumber = formatPhoneNumber(phoneNumber);
+            if (!pairingCode) {
+                throw new Error('পেয়ারিং কোড জেনারেট করা যায়নি');
+            }
+            
+            // কোড ফরম্যাট করুন (৮ ডিজিট, যেমন: 7777 7777)
+            const formattedCode = this.formatPairingCode(pairingCode);
+            
+            return {
+                success: true,
+                requestId,
+                pairingCode: pairingCode,
+                formattedCode: formattedCode,
+                expiresIn: '5 minutes',
+                instructions: `WhatsApp → Linked Devices → Link with number instead → এই কোড দিন: ${formattedCode}`
+            };
+            
+        } catch (error) {
+            console.error('❌ পেয়ারিং কোড তৈরি করতে সমস্যা:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+    
+    // পেয়ারিং কোড ফরম্যাট করুন (8 ডিজিট, যেমন: 7777 7777)
+    formatPairingCode(code) {
+        if (!code) return '';
+        // কোড থেকে সব non-digit বাদ দিন
+        const digits = code.replace(/\D/g, '');
+        // 8 ডিজিটে ফরম্যাট করুন (XXXX XXXX)
+        if (digits.length >= 8) {
+            return `${digits.substring(0, 4)} ${digits.substring(4, 8)}`;
+        }
+        return digits;
+    }
+    
+    // পেয়ারিং কোড দিয়ে সেশন কনফার্ম করুন
+    async confirmSessionWithCode(requestId, phoneNumber) {
+        try {
+            const request = this.pairingRequests[requestId];
+            
+            if (!request) {
+                return { success: false, error: '❌ রিকোয়েস্ট পাওয়া যায়নি' };
+            }
+            
+            if (request.status !== 'pending') {
+                return { success: false, error: '❌ এই রিকোয়েস্ট ইতিমধ্যে ব্যবহার করা হয়েছে' };
+            }
+            
+            if (Date.now() > request.expiresAt) {
+                delete this.pairingRequests[requestId];
+                db.pairingRequests = this.pairingRequests;
+                saveDatabase(db);
+                return { success: false, error: '❌ রিকোয়েস্টের মেয়াদ শেষ' };
+            }
+            
+            const formattedNumber = phoneNumber.replace(/\D/g, '');
             const sessionId = `session_${formattedNumber}_${Date.now()}`;
             
-            // সেশন ডাটা তৈরি
             const sessionData = {
                 sessionId,
                 phoneNumber: formattedNumber,
-                deviceName,
                 createdAt: Date.now(),
                 lastActive: Date.now(),
                 status: 'initializing',
-                messageCount: 0
+                messageCount: 0,
+                requestId: requestId
             };
             
-            // ডাটাবেসে সেশন সংরক্ষণ
             db.sessions[sessionId] = sessionData;
             
-            // পেয়ারিং কোড মুছে ফেলুন
-            delete this.pairingCodes[code];
-            db.pairingCodes = this.pairingCodes;
+            // রিকোয়েস্ট আপডেট করুন
+            request.status = 'used';
+            request.sessionId = sessionId;
+            request.usedAt = Date.now();
+            db.pairingRequests = this.pairingRequests;
             saveDatabase(db);
             
-            // WhatsApp কানেকশন শুরু করুন
+            // মূল সেশন কানেক্ট করুন
             await this.connectSession(sessionId, sessionData);
             
             return {
                 success: true,
                 sessionId,
                 phoneNumber: formattedNumber,
-                message: '✅ সেশন তৈরি হচ্ছে। অনুগ্রহ করে WhatsApp-এ কনফার্ম করুন।'
+                message: '✅ সেশন তৈরি হচ্ছে। অনুগ্রহ করে অপেক্ষা করুন...'
             };
             
         } catch (error) {
@@ -208,24 +266,15 @@ class WhatsAppManager {
                 }),
                 puppeteer: {
                     headless: true,
-                    args: [
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-accelerated-2d-canvas',
-                        '--disable-gpu',
-                        '--window-size=1920,1080'
-                    ]
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
                 }
             });
             
-            // ক্লায়েন্ট ইভেন্ট হ্যান্ডলার
             client.on('ready', () => {
                 console.log(`✅ সেশন কানেক্টেড: ${sessionData.phoneNumber}`);
                 this.clients[sessionId] = client;
                 this.readyStates[sessionId] = true;
                 
-                // ডাটাবেস আপডেট
                 sessionData.status = 'active';
                 sessionData.connectedAt = Date.now();
                 saveDatabase(db);
@@ -235,40 +284,19 @@ class WhatsAppManager {
                 console.log(`❌ সেশন ডিসকানেক্ট: ${sessionData.phoneNumber} - ${reason}`);
                 this.readyStates[sessionId] = false;
                 sessionData.status = 'disconnected';
-                sessionData.lastDisconnect = Date.now();
-                sessionData.disconnectReason = reason;
                 saveDatabase(db);
                 
-                // ১০ সেকেন্ড পর রিকানেক্ট করার চেষ্টা
                 setTimeout(() => {
                     if (sessionData.status !== 'active') {
-                        console.log(`🔄 রিকানেক্ট করা হচ্ছে: ${sessionData.phoneNumber}`);
                         this.connectSession(sessionId, sessionData);
                     }
                 }, 10000);
             });
             
-            client.on('message', async (message) => {
-                // মেসেজ রিসিভ হলে (ঐচ্ছিক)
-                console.log(`📩 ${sessionData.phoneNumber} থেকে মেসেজ: ${message.body}`);
-            });
-            
-            client.on('message_create', (message) => {
-                // মেসেজ পাঠানো হলে
-                if (message.fromMe) {
-                    sessionData.messageCount = (sessionData.messageCount || 0) + 1;
-                    db.stats.totalMessages++;
-                    saveDatabase(db);
-                }
-            });
-            
-            // ক্লায়েন্ট ইনিশিয়ালাইজ
             await client.initialize();
             
         } catch (error) {
-            console.error(`❌ সেশন এরর ${sessionData.phoneNumber}:`, error.message);
-            
-            // এরর হলে রিকানেক্ট
+            console.error(`❌ সেশন এরর:`, error.message);
             setTimeout(() => {
                 this.connectSession(sessionId, sessionData);
             }, 30000);
@@ -278,110 +306,75 @@ class WhatsAppManager {
     // মেসেজ পাঠান
     async sendMessage(sessionId, to, message) {
         try {
-            if (!this.readyStates[sessionId]) {
-                // সেশন আইডি না দিলে প্রথম অ্যাক্টিভ সেশন খুঁজে নিন
-                if (sessionId === 'default') {
-                    const activeSession = Object.keys(this.readyStates).find(id => this.readyStates[id]);
-                    if (activeSession) {
-                        sessionId = activeSession;
-                    } else {
-                        throw new Error('কোনো অ্যাক্টিভ সেশন নেই');
-                    }
+            let targetSessionId = sessionId;
+            
+            if (!this.readyStates[targetSessionId]) {
+                const activeSession = Object.keys(this.readyStates).find(id => this.readyStates[id]);
+                if (activeSession) {
+                    targetSessionId = activeSession;
                 } else {
-                    throw new Error('সেশন রেডি নয়');
+                    throw new Error('কোনো অ্যাক্টিভ সেশন নেই');
                 }
             }
             
-            const client = this.clients[sessionId];
-            if (!client) {
-                throw new Error('ক্লায়েন্ট পাওয়া যায়নি');
-            }
+            const client = this.clients[targetSessionId];
+            if (!client) throw new Error('ক্লায়েন্ট পাওয়া যায়নি');
             
-            // নম্বর ফরম্যাট করুন
             let formattedNumber = to.replace(/\D/g, '');
             if (!formattedNumber.startsWith('88')) {
                 formattedNumber = '88' + formattedNumber;
             }
             formattedNumber = `${formattedNumber}@c.us`;
             
-            // মেসেজ পাঠান
             const response = await client.sendMessage(formattedNumber, message);
             
-            // ডাটাবেস আপডেট
-            if (db.sessions[sessionId]) {
-                db.sessions[sessionId].lastActive = Date.now();
-                db.sessions[sessionId].lastMessage = Date.now();
+            if (db.sessions[targetSessionId]) {
+                db.sessions[targetSessionId].lastActive = Date.now();
+                db.sessions[targetSessionId].messageCount++;
+                db.stats.totalMessages++;
                 saveDatabase(db);
             }
             
             return {
                 success: true,
                 messageId: response.id.id,
-                timestamp: response.timestamp,
-                from: db.sessions[sessionId]?.phoneNumber || sessionId
+                from: db.sessions[targetSessionId]?.phoneNumber
             };
             
         } catch (error) {
-            return {
-                success: false,
-                error: error.message
-            };
+            return { success: false, error: error.message };
         }
     }
     
-    // সব সেশনের স্ট্যাটাস
-    getStatus() {
-        const status = {};
-        Object.entries(db.sessions).forEach(([id, data]) => {
-            status[id] = {
-                phoneNumber: data.phoneNumber,
-                deviceName: data.deviceName,
-                status: data.status,
-                isReady: this.readyStates[id] || false,
-                connectedAt: data.connectedAt,
-                lastActive: data.lastActive,
-                messageCount: data.messageCount || 0
-            };
-        });
-        return status;
-    }
-    
-    // মেয়াদোত্তীর্ণ কোড ক্লিনআপ
-    cleanupExpiredCodes() {
+    // মেয়াদোত্তীর্ণ রিকোয়েস্ট ক্লিনআপ
+    cleanupExpiredRequests() {
         let cleaned = 0;
-        Object.entries(this.pairingCodes).forEach(([code, data]) => {
+        Object.entries(this.pairingRequests).forEach(([id, data]) => {
             if (Date.now() > data.expiresAt) {
-                delete this.pairingCodes[code];
+                delete this.pairingRequests[id];
                 cleaned++;
             }
         });
         
         if (cleaned > 0) {
-            db.pairingCodes = this.pairingCodes;
+            db.pairingRequests = this.pairingRequests;
             saveDatabase(db);
-            console.log(`🧹 ${cleaned} টি মেয়াদোত্তীর্ণ কোড ক্লিনআপ করা হয়েছে`);
+            console.log(`🧹 ${cleaned} টি মেয়াদোত্তীর্ণ রিকোয়েস্ট ক্লিনআপ`);
         }
     }
     
-    // সেশন ডিসকানেক্ট
-    async disconnectSession(sessionId) {
-        try {
-            if (this.clients[sessionId]) {
-                await this.clients[sessionId].destroy();
-                delete this.clients[sessionId];
-                delete this.readyStates[sessionId];
-                
-                if (db.sessions[sessionId]) {
-                    db.sessions[sessionId].status = 'disconnected';
-                    saveDatabase(db);
-                }
-                
-                return { success: true };
-            }
-            return { success: false, error: 'সেশন পাওয়া যায়নি' };
-        } catch (error) {
-            return { success: false, error: error.message };
-        }
+    getStatus() {
+        const status = {};
+        Object.entries(db.sessions).forEach(([id, data]) => {
+            status[id] = {
+                phoneNumber: data.phoneNumber,
+                status: data.status,
+                isReady: this.readyStates[id] || false,
+                connectedAt: data.connectedAt,
+                messageCount: data.messageCount || 0
+            };
+        });
+        return status;
     }
 }
 
@@ -391,79 +384,58 @@ class WhatsAppManager {
 const manager = new WhatsAppManager();
 
 // =============================================
-// API এন্ডপয়েন্ট
+// API এন্ডপয়েন্ট (আপডেটেড)
 // =============================================
 
-// হোম পেজ
 app.get('/', (req, res) => {
     res.json({
-        app: '🤖 WhatsApp Link API',
-        version: '2.0.0 (Production)',
+        app: '🤖 WhatsApp Link API (সঠিক পেয়ারিং কোড সহ)',
+        version: '3.0.0',
         status: 'running',
         endpoints: {
             'GET /': 'এই তথ্য',
             'GET /status': 'সব সেশনের স্ট্যাটাস',
-            'POST /pairing-code': 'নতুন 8-ডিজিট কোড জেনারেট',
-            'POST /connect': 'কোড দিয়ে সেশন কানেক্ট',
-            'GET /sessions': 'সব সেশনের তালিকা',
+            'POST /request-pairing': 'পেয়ারিং কোড রিকোয়েস্ট করুন (ফোন নম্বর দিয়ে)',
+            'POST /confirm-pairing': 'পেয়ারিং কনফার্ম করুন',
             'POST /send-message': 'মেসেজ পাঠান',
-            'DELETE /session/:id': 'সেশন ডিসকানেক্ট',
-            'GET /stats': 'পরিসংখ্যান'
-        },
-        stats: {
-            activeSessions: Object.values(manager.readyStates).filter(v => v).length,
-            totalSessions: Object.keys(db.sessions).length,
-            totalMessages: db.stats.totalMessages || 0
+            'GET /send-message': 'মেসেজ পাঠান (GET)'
         }
     });
 });
 
-// স্ট্যাটাস এন্ডপয়েন্ট
-app.get('/status', (req, res) => {
-    res.json({
-        success: true,
-        timestamp: Date.now(),
-        sessions: manager.getStatus(),
-        stats: {
-            active: Object.values(manager.readyStates).filter(v => v).length,
-            total: Object.keys(db.sessions).length,
-            messages: db.stats.totalMessages || 0
-        }
-    });
-});
-
-// পেয়ারিং কোড জেনারেট
-app.post('/pairing-code', (req, res) => {
-    const result = manager.createPairingCode();
-    res.json(result);
-});
-
-// কোড দিয়ে কানেক্ট করুন
-app.post('/connect', (req, res) => {
-    const { code, phoneNumber, deviceName } = req.body;
+// **নতুন এন্ডপয়েন্ট: পেয়ারিং কোড রিকোয়েস্ট করুন**
+app.post('/request-pairing', async (req, res) => {
+    const { phoneNumber } = req.body;
     
-    if (!code || !phoneNumber) {
+    if (!phoneNumber) {
         return res.status(400).json({
             success: false,
-            error: 'code এবং phoneNumber প্রয়োজন'
+            error: 'phoneNumber প্রয়োজন (যেমন: 8801929671720)'
         });
     }
     
-    manager.createSessionWithCode(code, phoneNumber, deviceName)
-        .then(result => res.json(result));
+    const result = await manager.createPairingCode(phoneNumber);
+    res.json(result);
 });
 
-// সব সেশনের তালিকা
-app.get('/sessions', (req, res) => {
-    res.json({
-        success: true,
-        sessions: db.sessions
-    });
+// **নতুন এন্ডপয়েন্ট: পেয়ারিং কনফার্ম করুন**
+app.post('/confirm-pairing', (req, res) => {
+    const { requestId, phoneNumber } = req.body;
+    
+    if (!requestId || !phoneNumber) {
+        return res.status(400).json({
+            success: false,
+            error: 'requestId এবং phoneNumber প্রয়োজন'
+        });
+    }
+    
+    manager.confirmSessionWithCode(requestId, phoneNumber)
+        .then(result => res.json(result));
 });
 
 // মেসেজ পাঠান
 app.post('/send-message', async (req, res) => {
-    const { sessionId, to, message } = req.body;
+    const { to, message } = req.body;
     
     if (!to || !message) {
         return res.status(400).json({
@@ -472,13 +444,12 @@ app.post('/send-message', async (req, res) => {
         });
     }
     
-    const result = await manager.sendMessage(sessionId || 'default', to, message);
+    const result = await manager.sendMessage(null, to, message);
     res.json(result);
 });
 
-// GET মেথডেও মেসেজ পাঠান (সিম্পল ইউজের জন্য)
 app.get('/send-message', async (req, res) => {
-    const { to, text, session } = req.query;
+    const { to, text } = req.query;
     
     if (!to || !text) {
         return res.json({
@@ -488,68 +459,15 @@ app.get('/send-message', async (req, res) => {
         });
     }
     
-    const result = await manager.sendMessage(session || 'default', to, text);
+    const result = await manager.sendMessage(null, to, text);
     res.json(result);
 });
 
-// সেশন ডিসকানেক্ট
-app.delete('/session/:id', async (req, res) => {
-    const result = await manager.disconnectSession(req.params.id);
-    res.json(result);
-});
-
-// পরিসংখ্যান
-app.get('/stats', (req, res) => {
+app.get('/status', (req, res) => {
     res.json({
         success: true,
-        ...db.stats,
-        activeNow: Object.values(manager.readyStates).filter(v => v).length,
-        uptime: process.uptime()
-    });
-});
-
-// হেলথ চেক
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'healthy',
-        timestamp: Date.now(),
-        uptime: process.uptime(),
-        memory: process.memoryUsage(),
-        sessions: Object.keys(manager.readyStates).filter(id => manager.readyStates[id]).length
-    });
-});
-
-// =============================================
-// 404 হ্যান্ডলার
-// =============================================
-app.use((req, res) => {
-    res.status(404).json({
-        success: false,
-        error: 'এন্ডপয়েন্ট পাওয়া যায়নি',
-        availableEndpoints: [
-            'GET /',
-            'GET /status',
-            'POST /pairing-code',
-            'POST /connect',
-            'GET /sessions',
-            'POST /send-message',
-            'GET /send-message',
-            'DELETE /session/:id',
-            'GET /stats',
-            'GET /health'
-        ]
-    });
-});
-
-// =============================================
-// এরর হ্যান্ডলার
-// =============================================
-app.use((err, req, res, next) => {
-    console.error('❌ সার্ভার এরর:', err);
-    res.status(500).json({
-        success: false,
-        error: 'অভ্যন্তরীণ সার্ভার এরর',
-        message: err.message
+        sessions: manager.getStatus(),
+        activeCount: Object.values(manager.readyStates).filter(v => v).length
     });
 });
 
@@ -559,66 +477,36 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║     🚀 WhatsApp Link API - প্রোডাকশন মোডে চালু হয়েছে     ║
+║   🚀 WhatsApp Link API (সঠিক পেয়ারিং কোড সহ) চালু হয়েছে   ║
 ╚══════════════════════════════════════════════════════════╝
 
-📡 লোকাল URL: http://localhost:${PORT}
-🌍 লোকাল নেটওয়ার্ক: http://${require('os').networkInterfaces()['eth0']?.[0]?.address || '192.168.x.x'}:${PORT}
+📡 URL: http://localhost:${PORT}
 
-📊 পরিসংখ্যান:
-   • সংযুক্ত সেশন: ${Object.keys(db.sessions).length}
-   • অ্যাক্টিভ সেশন: ${Object.values(manager.readyStates).filter(v => v).length}
-   • মোট মেসেজ: ${db.stats.totalMessages || 0}
+🔑 **সঠিক পদ্ধতি:** 
+   
+1️⃣ পেয়ারিং কোড রিকোয়েস্ট করুন:
+   POST /request-pairing
+   Body: { "phoneNumber": "8801929671720" }
+   
+   রেসপন্স: { 
+     "success": true, 
+     "requestId": "req_12345",
+     "pairingCode": "77777777",
+     "formattedCode": "7777 7777"
+   }
 
-🔗 API ব্যবহার করুন:
+2️⃣ WhatsApp-এ কোড দিন:
+   WhatsApp → Linked Devices → Link with number instead
+   কোড: 7777 7777
 
-1️⃣ নতুন পেয়ারিং কোড জেনারেট:
-   POST /pairing-code
-   → রেসপন্স: { "code": "12345678" }
+3️⃣ পেয়ারিং কনফার্ম করুন:
+   POST /confirm-pairing
+   Body: { 
+     "requestId": "req_12345",
+     "phoneNumber": "8801929671720" 
+   }
 
-2️⃣ কোড দিয়ে কানেক্ট করুন:
-   POST /connect
-   Body: { "code": "12345678", "phoneNumber": "8801929671720" }
-
-3️⃣ মেসেজ পাঠান (GET):
+4️⃣ মেসেজ পাঠান:
    GET /send-message?to=+8801929671720&text=হ্যালো
-
-4️⃣ মেসেজ পাঠান (POST):
-   POST /send-message
-   Body: { "to": "+8801929671720", "message": "হ্যালো" }
-
-5️⃣ স্ট্যাটাস দেখুন:
-   GET /status
-
-6️⃣ পরিসংখ্যান দেখুন:
-   GET /stats
-
-⚠️ গুরুত্বপূর্ণ:
-   • প্রতিটি কোড ৫ মিনিটের জন্য বৈধ
-   • একবার ব্যবহার করলে কোড মুছে যায়
-   • সেশন অটোমেটিক্যালি সংরক্ষিত হয়
-   • ডিসকানেক্ট হলে অটো রিকানেক্ট করে
 `);
-});
-
-// গ্রেসফুল শাটডাউন
-process.on('SIGINT', async () => {
-    console.log('\n\n👋 সার্ভার বন্ধ হচ্ছে...');
-    
-    // সব সেশন ডিসকানেক্ট করুন
-    for (const sessionId of Object.keys(manager.clients)) {
-        try {
-            await manager.clients[sessionId].destroy();
-        } catch (e) {}
-    }
-    
-    saveDatabase(db);
-    console.log('✅ ডাটাবেস সংরক্ষিত হয়েছে');
-    process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-    console.log('\n\n👋 সার্ভার বন্ধ হচ্ছে (SIGTERM)...');
-    saveDatabase(db);
-    process.exit(0);
 });
