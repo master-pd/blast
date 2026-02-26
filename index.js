@@ -1,290 +1,155 @@
-const express = require('express');
-const nodemailer = require('nodemailer');
-const cors = require('cors');
 require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const qrcode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// =============================================
-// ইমেইল ট্রান্সপোর্টার কনফিগারেশন
-// =============================================
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+const sessions = new Map(); // runtime-এ active sockets
+const SESSIONS_DIR = path.join(__dirname, 'sessions');
+
+// Create sessions folder
+if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+
+// Simple auth middleware (optional but professional)
+const authMiddleware = (req, res, next) => {
+  if (!API_KEY) return next();
+  const key = req.headers['x-api-key'] || req.query.api_key;
+  if (key !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
+  next();
+};
+
+// Load all existing sessions on startup
+const loadSessions = async () => {
+  const dirs = fs.readdirSync(SESSIONS_DIR);
+  for (const sessionId of dirs) {
+    if (fs.statSync(path.join(SESSIONS_DIR, sessionId)).isDirectory()) {
+      console.log(`🔄 Loading session: ${sessionId}`);
+      await createSession(sessionId);
+    }
   }
+};
+
+// Create / Connect WhatsApp Session
+const createSession = async (sessionId) => {
+  const { state, saveCreds } = await useMultiFileAuthState(path.join(SESSIONS_DIR, sessionId));
+
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    logger: undefined,
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      const qrData = await qrcode.toDataURL(qr);
+      sessions.set(sessionId, { sock, status: 'QR', qr: qrData });
+      console.log(`📱 QR Ready for ${sessionId}`);
+    }
+
+    if (connection === 'close') {
+      const shouldReconnect = (lastDisconnect?.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log(`❌ Connection closed for ${sessionId}, reconnecting: ${shouldReconnect}`);
+      if (shouldReconnect) {
+        setTimeout(() => createSession(sessionId), 5000);
+      } else {
+        sessions.delete(sessionId);
+      }
+    } else if (connection === 'open') {
+      console.log(`✅ ${sessionId} Connected!`);
+      sessions.set(sessionId, { sock, status: 'CONNECTED', qr: null });
+    }
+  });
+
+  sessions.set(sessionId, { sock, status: 'INITIALIZING', qr: null });
+  return sock;
+};
+
+// ==================== ROUTES ====================
+
+// GET /api/sessions → সব account list + status
+app.get('/api/sessions', authMiddleware, (req, res) => {
+  const list = Array.from(sessions.entries()).map(([id, data]) => ({
+    sessionId: id,
+    status: data.status,
+    connected: data.status === 'CONNECTED'
+  }));
+  res.json({ success: true, sessions: list });
 });
 
-// =============================================
-// অপারেটর ডিটেক্টর ফাংশন
-// =============================================
-function getOperatorEmail(phoneNumber) {
-  // নম্বর ক্লিন করুন
-  let cleanNumber = phoneNumber.replace(/\D/g, '');
-  
-  // ফরম্যাট চেক
-  if (cleanNumber.length === 11) {
-    cleanNumber = '88' + cleanNumber;
-  } else if (cleanNumber.length === 13 && cleanNumber.startsWith('88')) {
-    // ঠিক আছে
+// GET /api/session/:id/qr → QR code (base64)
+app.get('/api/session/:id/qr', authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  let session = sessions.get(id);
+
+  if (!session) {
+    await createSession(id);
+    session = sessions.get(id);
+  }
+
+  if (session.qr) {
+    res.json({ success: true, sessionId: id, qr: session.qr });
+  } else if (session.status === 'CONNECTED') {
+    res.json({ success: true, sessionId: id, message: 'Already connected' });
   } else {
-    throw new Error('Invalid phone number format. Use 11 or 13 digits');
+    res.json({ success: false, message: 'QR not ready yet, try again in 2 seconds' });
+  }
+});
+
+// POST /api/send (text message) → GET ও POST দুইটাতেই কাজ করে
+const sendMessageHandler = async (req, res) => {
+  const { sessionId, to, message } = req.method === 'GET' ? req.query : req.body;
+
+  if (!sessionId || !to || !message) {
+    return res.status(400).json({ error: 'sessionId, to, message required' });
   }
 
-  // অপারেটর ডিটেক্ট
-  if (cleanNumber.startsWith('88019')) {
-    return { email: `${cleanNumber}@text.grameenphone.com`, operator: 'Grameenphone' };
-  } else if (cleanNumber.startsWith('88018')) {
-    return { email: `${cleanNumber}@robi.com.bd`, operator: 'Robi' };
-  } else if (cleanNumber.startsWith('88017')) {
-    return { email: `${cleanNumber}@sms.ebl.com`, operator: 'Banglalink' };
-  } else if (cleanNumber.startsWith('88016')) {
-    return { email: `${cleanNumber}@airtel.com.bd`, operator: 'Airtel' };
-  } else if (cleanNumber.startsWith('88015')) {
-    return { email: `${cleanNumber}@tmail.teletalk.com.bd`, operator: 'Teletalk' };
-  } else {
-    throw new Error('Unknown operator. Supported: 019, 018, 017, 016, 015');
+  const session = sessions.get(sessionId);
+  if (!session || session.status !== 'CONNECTED') {
+    return res.status(400).json({ error: `Session ${sessionId} not connected. Scan QR first.` });
   }
-}
 
-// =============================================
-// ভ্যালিডেশন ফাংশন
-// =============================================
-function validateRequest(to, message) {
-  const errors = [];
-  
-  if (!to) errors.push('Phone number is required');
-  if (!message) errors.push('Message is required');
-  if (message && message.length > 160) errors.push('Message too long (max 160 chars)');
-  
   try {
-    if (to) getOperatorEmail(to);
-  } catch (e) {
-    errors.push(e.message);
+    const jid = to.endsWith('@s.whatsapp.net') ? to : `${to.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+    await session.sock.sendMessage(jid, { text: message });
+    res.json({ success: true, message: 'Message sent!', from: sessionId, to });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  
-  return errors;
-}
+};
 
-// =============================================
-// হেলথ চেক এন্ডপয়েন্ট
-// =============================================
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    email: process.env.EMAIL_USER ? '✅ Configured' : '❌ Not configured'
-  });
-});
+app.get('/api/send', authMiddleware, sendMessageHandler);
+app.post('/api/send', authMiddleware, sendMessageHandler);
 
-// =============================================
-// API হোম পেজ
-// =============================================
-app.get('/', (req, res) => {
-  res.json({
-    app: '📧 ইমেইল-টু-SMS API',
-    version: '3.0.0',
-    status: 'running',
-    documentation: {
-      get_method: {
-        url: '/send?to=8801929671720&message=Hello',
-        method: 'GET',
-        example: 'curl "https://your-api.com/send?to=8801929671720&message=Hello"'
-      },
-      post_method: {
-        url: '/send',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: { to: '8801929671720', message: 'Hello' },
-        example: 'curl -X POST -H "Content-Type: application/json" -d \'{"to":"8801929671720","message":"Hello"}\' https://your-api.com/send'
-      },
-      operators: '/operators - সাপোর্টেড অপারেটর লিস্ট'
-    },
-    endpoints: [
-      { path: '/', method: 'GET', description: 'API তথ্য' },
-      { path: '/health', method: 'GET', description: 'হেলথ চেক' },
-      { path: '/send', method: 'GET', description: 'GET মেথডে SMS পাঠান' },
-      { path: '/send', method: 'POST', description: 'POST মেথডে SMS পাঠান' },
-      { path: '/operators', method: 'GET', description: 'সাপোর্টেড অপারেটর লিস্ট' }
-    ]
-  });
-});
-
-// =============================================
-// GET Method - SMS পাঠান
-// URL: /send?to=8801929671720&message=Hello
-// =============================================
-app.get('/send', async (req, res) => {
-  const { to, message } = req.query;
-  
-  // ভ্যালিডেশন
-  const errors = validateRequest(to, message);
-  if (errors.length > 0) {
-    return res.status(400).json({
-      success: false,
-      errors: errors,
-      example: '/send?to=8801929671720&message=Hello'
-    });
+// Extra: Logout session
+app.post('/api/session/:id/logout', authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const session = sessions.get(id);
+  if (session) {
+    await session.sock.logout();
+    sessions.delete(id);
+    fs.rmSync(path.join(SESSIONS_DIR, id), { recursive: true, force: true });
   }
-  
-  try {
-    // অপারেটর ইমেইল বের করুন
-    const { email, operator } = getOperatorEmail(to);
-    
-    // ইমেইল পাঠান
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: '', // খালি রাখুন
-      text: message
-    };
-    
-    const info = await transporter.sendMail(mailOptions);
-    
-    res.json({
-      success: true,
-      message: 'SMS sent successfully',
-      to: to,
-      operator: operator,
-      messageId: info.messageId,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+  res.json({ success: true, message: `Session ${id} logged out` });
 });
 
-// =============================================
-// POST Method - SMS পাঠান
-// URL: /send
-// Body: { "to": "8801929671720", "message": "Hello" }
-// =============================================
-app.post('/send', async (req, res) => {
-  const { to, message } = req.body;
-  
-  // ভ্যালিডেশন
-  const errors = validateRequest(to, message);
-  if (errors.length > 0) {
-    return res.status(400).json({
-      success: false,
-      errors: errors,
-      example: { to: '8801929671720', message: 'Hello' }
-    });
-  }
-  
-  try {
-    // অপারেটর ইমেইল বের করুন
-    const { email, operator } = getOperatorEmail(to);
-    
-    // ইমেইল পাঠান
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: '', // খালি রাখুন
-      text: message
-    };
-    
-    const info = await transporter.sendMail(mailOptions);
-    
-    res.json({
-      success: true,
-      message: 'SMS sent successfully',
-      to: to,
-      operator: operator,
-      messageId: info.messageId,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// =============================================
-// সাপোর্টেড অপারেটর লিস্ট
-// =============================================
-app.get('/operators', (req, res) => {
-  res.json({
-    success: true,
-    operators: [
-      { code: '019', name: 'Grameenphone', email: '88019XXXXXXXX@text.grameenphone.com' },
-      { code: '018', name: 'Robi', email: '88018XXXXXXXX@robi.com.bd' },
-      { code: '017', name: 'Banglalink', email: '88017XXXXXXXX@sms.ebl.com' },
-      { code: '016', name: 'Airtel', email: '88016XXXXXXXX@airtel.com.bd' },
-      { code: '015', name: 'Teletalk', email: '88015XXXXXXXX@tmail.teletalk.com.bd' }
-    ],
-    format: '8801XXXXXXXXX (13 digits) or 01XXXXXXXXX (11 digits)',
-    note: 'Max message length: 160 characters'
-  });
-});
-
-// =============================================
-// 404 হ্যান্ডলার
-// =============================================
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Endpoint not found',
-    availableEndpoints: [
-      'GET /',
-      'GET /health',
-      'GET /send?to=number&message=text',
-      'POST /send',
-      'GET /operators'
-    ]
-  });
-});
-
-// =============================================
-// সার্ভার চালু
-// =============================================
-app.listen(PORT, () => {
-  console.log(`
-╔══════════════════════════════════════════════════════════╗
-║     📧 ইমেইল-টু-SMS API চালু হয়েছে                      ║
-╚══════════════════════════════════════════════════════════╝
-
-📡 লোকাল URL: http://localhost:${PORT}
-🌍 লোকাল নেটওয়ার্ক: http://${require('os').networkInterfaces()['eth0']?.[0]?.address || '192.168.x.x'}:${PORT}
-
-📧 ইমেইল: ${process.env.EMAIL_USER ? '✅ Configured' : '❌ Not configured'}
-
-🔗 API ব্যবহার:
-
-1️⃣ GET Method (সহজ):
-   http://localhost:${PORT}/send?to=8801929671720&message=Hello
-
-2️⃣ POST Method:
-   curl -X POST http://localhost:${PORT}/send \\
-     -H "Content-Type: application/json" \\
-     -d '{"to": "8801929671720", "message": "Hello"}'
-
-3️⃣ সাপোর্টেড অপারেটর দেখুন:
-   http://localhost:${PORT}/operators
-
-4️⃣ হেলথ চেক:
-   http://localhost:${PORT}/health
-
-⚠️ মনে রাখবেন:
-   • নম্বর: 8801929671720 (13 digits) বা 01929671720 (11 digits)
-   • মেসেজ: সর্বোচ্চ 160 ক্যারেক্টার
-   • সাবজেক্ট খালি রাখতে হবে
-`);
+// Start Server
+app.listen(PORT, async () => {
+  console.log(`🚀 WhatsMultiAPI Professional Server running on http://localhost:${PORT}`);
+  await loadSessions();
+  console.log('✅ All sessions loaded!');
 });
