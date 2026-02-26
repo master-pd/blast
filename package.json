@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-pairing-api",
-  "version": "4.0.0",
-  "description": "WhatsApp API with 8-digit pairing code system",
+  "name": "email-to-sms-api",
+  "version": "3.0.0",
+  "description": "Email to SMS Gateway API with GET/POST methods",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -9,9 +9,9 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "whatsapp-web.js": "^1.23.0",
-    "qrcode": "^1.5.3",
-    "cors": "^2.8.5"
+    "nodemailer": "^6.9.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
