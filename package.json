@@ -1,13 +1,12 @@
 {
-  "name": "blast-whatsapp-api-final-2026",
-  "version": "15.2.0",
-  "description": "Ultimate Multi-Session WhatsApp API – Md Dhaka – Production Ready – No Auth",
+  "name": "blast-whatsapp-api",
+  "version": "15.1.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0",
+    "@whiskeysockets/baileys": "^6.7.16",
     "express": "^4.21.0",
     "qrcode": "^1.5.4",
     "dotenv": "^16.4.5",
