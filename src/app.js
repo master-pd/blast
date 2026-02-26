@@ -1,12 +1,10 @@
-// src/app.js - auth middleware সরিয়ে ফেলুন
+// src/app.js
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
-const authRoutes = require('./routes/authRoutes');
-const accountRoutes = require('./routes/accountRoutes');
-const messageRoutes = require('./routes/messageRoutes');
+console.log('🚀 Initializing Express app...');
 
 const app = express();
 
@@ -43,52 +41,26 @@ app.use((req, res, next) => {
     next();
 });
 
-// API Routes - কোন auth middleware নেই
-app.use('/api/auth', authRoutes);
-app.use('/api/accounts', accountRoutes);
-app.use('/api/messages', messageRoutes);
-
-// API Documentation
-app.get('/api', (req, res) => {
+// রুট রাউট
+app.get('/', (req, res) => {
+    console.log('🏠 Home route hit');
     res.json({
         success: true,
-        name: 'Blaster API',
+        message: 'Blaster API is running',
         version: '1.0.0',
-        description: 'WhatsApp Account Rental & Blasting System (Public API)',
-        authentication: 'No token required - Public API',
         endpoints: {
-            auth: {
-                register: 'POST /api/auth/register',
-                login: 'POST /api/auth/login',
-                profile: 'GET /api/auth/profile/:userId'
-            },
-            accounts: {
-                add: 'POST /api/accounts/add (send userId in body)',
-                myAccounts: 'GET /api/accounts/my/:userId',
-                getQR: 'GET /api/accounts/qr/:accountId',
-                offerForRent: 'POST /api/accounts/offer/:accountId (send userId in body)',
-                remove: 'DELETE /api/accounts/:accountId (send userId in body)'
-            },
-            admin: {
-                pendingRentals: 'GET /api/accounts/pending',
-                availableAccounts: 'GET /api/accounts/available',
-                rentedAccounts: 'GET /api/accounts/rented/:adminId',
-                approveAccount: 'POST /api/accounts/approve/:accountId',
-                rentAccount: 'POST /api/accounts/rent/:accountId',
-                returnAccount: 'POST /api/accounts/return/:accountId'
-            },
-            messages: {
-                blast: 'POST /api/messages/blast (send adminId in body)',
-                send: 'POST /api/messages/send (send adminId in body)',
-                history: 'GET /api/messages/history/:adminId',
-                status: 'GET /api/messages/status/:messageId'
-            }
+            auth: '/api/auth',
+            accounts: '/api/accounts',
+            messages: '/api/messages',
+            health: '/health',
+            docs: '/api'
         }
     });
 });
 
-// Health Check
+// হেলথ চেক
 app.get('/health', (req, res) => {
+    console.log('❤️ Health check hit');
     res.json({ 
         success: true, 
         status: 'healthy',
@@ -97,17 +69,75 @@ app.get('/health', (req, res) => {
     });
 });
 
+// API Routes
+console.log('📦 Loading routes...');
+
+try {
+    const authRoutes = require('./routes/authRoutes');
+    const accountRoutes = require('./routes/accountRoutes');
+    const messageRoutes = require('./routes/messageRoutes');
+
+    console.log('✅ Routes loaded successfully');
+
+    app.use('/api/auth', authRoutes);
+    console.log('✅ /api/auth route mounted');
+
+    app.use('/api/accounts', accountRoutes);
+    console.log('✅ /api/accounts route mounted');
+
+    app.use('/api/messages', messageRoutes);
+    console.log('✅ /api/messages route mounted');
+
+} catch (error) {
+    console.error('❌ Error loading routes:', error);
+}
+
+// API Documentation
+app.get('/api', (req, res) => {
+    console.log('📚 API docs hit');
+    res.json({
+        success: true,
+        name: 'Blaster API',
+        version: '1.0.0',
+        description: 'WhatsApp Account Rental & Blasting System (Public API)',
+        endpoints: {
+            auth: {
+                register: 'POST /api/auth/register',
+                login: 'POST /api/auth/login',
+                profile: 'GET /api/auth/profile/:userId',
+                users: 'GET /api/auth/users',
+                test: 'GET /api/auth/test'
+            },
+            accounts: {
+                add: 'POST /api/accounts/add',
+                myAccounts: 'GET /api/accounts/my/:userId',
+                getQR: 'GET /api/accounts/qr/:accountId',
+                offerForRent: 'POST /api/accounts/offer/:accountId',
+                remove: 'DELETE /api/accounts/:accountId'
+            },
+            messages: {
+                blast: 'POST /api/messages/blast',
+                send: 'POST /api/messages/send',
+                history: 'GET /api/messages/history/:adminId',
+                status: 'GET /api/messages/status/:messageId'
+            }
+        }
+    });
+});
+
 // 404 Handler
 app.use('*', (req, res) => {
+    console.log('❓ 404 for:', req.originalUrl);
     res.status(404).json({
         success: false,
-        error: 'API endpoint not found'
+        error: 'API endpoint not found',
+        path: req.originalUrl
     });
 });
 
 // Error Handler
 app.use((err, req, res, next) => {
-    console.error('Server Error:', err);
+    console.error('💥 Server Error:', err);
     res.status(500).json({
         success: false,
         error: 'Internal server error',
@@ -115,4 +145,5 @@ app.use((err, req, res, next) => {
     });
 });
 
+console.log('✅ Express app configured');
 module.exports = app;
