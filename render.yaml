@@ -2,12 +2,15 @@ services:
   - type: web
     name: firebase-auth-api
     runtime: node
-    repo: https://github.com/master-pd/blast.git
     plan: free
+    buildCommand: npm install
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: CORS_ORIGIN
-        value: https://your-frontend-domain.com
-    buildCommand: npm install
-    startCommand: npm start
+        value: 
+      - key: RATE_LIMIT_WINDOW_MS
+        value: 900000
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: 100
