@@ -1,26 +1,13 @@
 services:
   - type: web
-    name: blaster-api
+    name: firebase-auth-api
     runtime: node
+    repo: https://github.com/yourusername/firebase-auth-system
     plan: free
-    buildCommand: npm install
-    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 3000
-      - key: JWT_SECRET
-        generateValue: true
-      - key: FIREBASE_PROJECT_ID
-        sync: false
-      - key: FIREBASE_PRIVATE_KEY
-        sync: false
-      - key: FIREBASE_CLIENT_EMAIL
-        sync: false
-      - key: FIREBASE_DATABASE_URL
-        sync: false
-    disk:
-      name: whatsapp-sessions
-      mountPath: /opt/render/project/src/sessions
-      sizeGB: 1
+      - key: CORS_ORIGIN
+        value: https://your-frontend-domain.com
+    buildCommand: npm install
+    startCommand: npm start
