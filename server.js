@@ -1,81 +1,122 @@
-// server.js - ফিক্সড ভার্সন
-const app = require('./src/app');
-const dotenv = require('dotenv');
-const { db } = require('./src/config/firebase');
-const User = require('./src/models/User');
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const bodyParser = require('body-parser');
+const morgan = require('morgan');
+require('dotenv').config();
 
-dotenv.config();
+const authRoutes = require('./routes/auth');
 
-const PORT = process.env.PORT || 3000;
+const app = express();
+const PORT = process.env.PORT || 5000;
 
-// Test Firebase Connection
-const testFirebase = async () => {
-    try {
-        const testRef = db.collection('test').doc('connection');
-        await testRef.set({ 
-            timestamp: new Date().toISOString(),
-            status: 'connected' 
-        });
-        console.log('✅ Firebase Connected Successfully');
-        return true;
-    } catch (error) {
-        console.error('❌ Firebase Connection Failed:', error.message);
-        return false;
-    }
-};
+// Security middleware
+app.use(helmet());
 
-// Create Default Admin
-const createDefaultAdmin = async () => {
-    try {
-        const adminEmail = process.env.ADMIN_EMAIL || 'admin@blaster.com';
-        const existingAdmin = await User.getByEmail(adminEmail);
-        
-        if (!existingAdmin) {
-            const User = require('./src/models/User');
-            const admin = new User({
-                name: 'Super Admin',
-                email: adminEmail,
-                password: process.env.ADMIN_PASSWORD || 'Admin@123456',
-                role: 'admin'
-            });
-            await admin.save();
-            console.log('✅ Default Admin Created');
-        } else {
-            console.log('✅ Admin Already Exists');
-        }
-    } catch (error) {
-        console.error('❌ Admin Creation Failed:', error.message);
-    }
-};
+// CORS configuration
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
-// Initialize
-const initialize = async () => {
-    const firebaseConnected = await testFirebase();
-    if (firebaseConnected) {
-        await createDefaultAdmin();
-    }
-};
+// Logging middleware
+app.use(morgan('combined'));
 
-initialize();
+// Rate limiting - 100 requests per 15 minutes
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again after 15 minutes'
+  }
+});
+app.use('/api/', limiter);
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`
-    ╔════════════════════════════════════╗
-    ║         BLASTER API v1.0           ║
-    ╠════════════════════════════════════╣
-    ║  🚀 Server: http://localhost:${PORT}   ║
-    ║  📡 Status: RUNNING                  ║
-    ║  🔥 Firebase: CONNECTED               ║
-    ║  📊 Environment: ${process.env.NODE_ENV}  ║
-    ╚════════════════════════════════════╝
-    `);
+// Body parser middleware
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
+
+// Routes
+app.use('/api/auth', authRoutes);
+
+// Health check endpoint (Render এর জন্য গুরুত্বপূর্ণ)
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    success: true,
+    status: 'OK', 
+    message: 'Server is running',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
 
-// Graceful Shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received. Closing server...');
-    server.close(() => {
-        console.log('Server closed');
-        process.exit(0);
-    });
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    name: 'Firebase Authentication API',
+    version: '1.0.0',
+    description: 'Phone Number OTP Authentication System',
+    environment: process.env.NODE_ENV || 'development',
+    endpoints: {
+      sendOTP: {
+        method: 'POST',
+        url: '/api/auth/send-otp',
+        body: { phoneNumber: 'string' }
+      },
+      verifyOTP: {
+        method: 'POST',
+        url: '/api/auth/verify-otp',
+        body: { idToken: 'string', phoneNumber: 'string' }
+      },
+      getUserData: {
+        method: 'GET',
+        url: '/api/auth/user/:uid',
+        headers: { Authorization: 'Bearer <token>' }
+      },
+      updateProfile: {
+        method: 'PUT',
+        url: '/api/auth/update-profile',
+        headers: { Authorization: 'Bearer <token>' },
+        body: { uid: 'string', displayName: 'string', email: 'string', photoURL: 'string' }
+      },
+      deleteUser: {
+        method: 'DELETE',
+        url: '/api/auth/user/:uid',
+        headers: { Authorization: 'Bearer <token>' }
+      }
+    }
+  });
 });
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route not found'
+  });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Global error:', err.stack);
+  
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Internal Server Error',
+    error: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  });
+});
+
+// Server start
+app.listen(PORT, () => {
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+});
+
+module.exports = app;
