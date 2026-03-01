@@ -2,7 +2,7 @@ services:
   - type: web
     name: firebase-auth-api
     runtime: node
-    repo: https://github.com/yourusername/firebase-auth-system
+    repo: https://github.com/master-pd/blast.git
     plan: free
     envVars:
       - key: NODE_ENV
