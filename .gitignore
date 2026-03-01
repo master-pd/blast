@@ -1,54 +1,35 @@
-# Dependencies
+# Dependency directories
 node_modules/
-package-lock.json
-yarn.lock
 
-# Environment
+# Environment variables
 .env
 .env.local
 .env.production
 
-# Firebase
-firebase-credentials.json
-*-firebase-adminsdk-*.json
-
-# Sessions
-sessions/
-*.session
-*.data
-
 # Logs
-logs/
+logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
 # Runtime data
-pids/
+pids
 *.pid
 *.seed
 *.pid.lock
 
-# Coverage
-coverage/
-.nyc_output/
+# Firebase
+firebase-service-account.json
+serviceAccountKey.json
 
-# Build
+# Build outputs
 dist/
 build/
-*.tsbuildinfo
 
-# Misc
+# OS files
 .DS_Store
-*.pem
-*.db
-*.sqlite
+Thumbs.db
 
-# Debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# PM2
-.pm2/
+# Render specific
+render.yaml
